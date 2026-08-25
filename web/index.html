@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Tushare · demo-mcp</title>
+<style>
+  :root {
+    --bg:#0d1117; --panel:#141922; --panel2:#1a212c; --border:#232b37;
+    --fg:#e6ebf0; --muted:#8b949e; --accent:#5a9cf8; --accent2:#7cc0ff;
+    --ok:#4ade80; --err:#f87171; --warn:#fbbf24;
+    --radius:12px; --mono:ui-monospace,SFMono-Regular,Consolas,monospace;
+  }
+  * { box-sizing:border-box; }
+  html,body { height:100%; margin:0; }
+  body {
+    display:grid; grid-template-columns:248px 1fr; height:100vh; overflow:hidden;
+    background:var(--bg); color:var(--fg);
+    font:14px/1.6 -apple-system,"Segoe UI",system-ui,"PingFang SC","Microsoft YaHei",sans-serif;
+  }
+
+  /* 侧栏 */
+  aside {
+    display:flex; flex-direction:column; border-right:1px solid var(--border);
+    background:var(--panel);
+  }
+  .sb-head { display:flex; align-items:center; justify-content:space-between; padding:14px 14px 10px; }
+  .sb-head .t { font-weight:600; font-size:13px; letter-spacing:.5px; color:var(--muted); }
+  .btn {
+    border:1px solid var(--border); background:transparent; color:var(--fg);
+    border-radius:8px; padding:5px 10px; font-size:12px; cursor:pointer;
+  }
+  .btn:hover { background:var(--panel2); }
+  .btn.primary { border-color:var(--accent); color:var(--accent2); }
+  #sessions { list-style:none; margin:0; padding:4px 8px 12px; overflow-y:auto; flex:1; }
+  #sessions li {
+    display:flex; align-items:center; gap:8px; padding:8px 10px; border-radius:8px;
+    cursor:pointer; color:var(--fg); font-size:12px;
+  }
+  #sessions li:hover { background:var(--panel2); }
+  #sessions li.active { background:var(--panel2); border:1px solid var(--border); }
+  #sessions .s-date { flex:1; color:var(--fg); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #sessions .s-count { color:var(--muted); }
+  #sessions .s-del { color:var(--muted); cursor:pointer; font-size:14px; }
+  #sessions .s-del:hover { color:var(--err); }
+  .sb-empty { color:var(--muted); font-size:12px; padding:16px; text-align:center; }
+
+  /* 主区 */
+  main { display:flex; flex-direction:column; height:100vh; }
+  header {
+    display:flex; align-items:center; gap:12px; padding:12px 20px;
+    border-bottom:1px solid var(--border); background:var(--panel);
+  }
+  header h1 { margin:0; font-size:15px; font-weight:600; }
+  header .badge {
+    font-size:11px; color:var(--accent2); border:1px solid var(--border);
+    padding:2px 8px; border-radius:999px; background:var(--panel2);
+  }
+  header .hint { color:var(--muted); font-size:12px; margin-left:auto; }
+  #log { flex:1; overflow-y:auto; padding:22px 20px; }
+  .msg { max-width:76%; margin:0 0 16px; }
+  .msg.user { margin-left:auto; }
+  .msg.user .content {
+    background:var(--accent); color:#fff; padding:10px 14px; border-radius:14px 14px 3px 14px;
+  }
+  .msg.assistant .content {
+    background:var(--panel); border:1px solid var(--border);
+    padding:12px 16px; border-radius:14px 14px 14px 3px;
+  }
+  .track { display:flex; flex-wrap:wrap; gap:6px; margin:0 0 8px; min-height:0; }
+  .track:empty { display:none; }
+  .chip {
+    font:11px var(--mono); padding:3px 8px; border-radius:999px;
+    border:1px solid var(--border); color:var(--muted); background:var(--panel2);
+  }
+  .chip.ok { color:var(--ok); border-color:rgba(74,222,128,.35); }
+  .chip.err { color:var(--err); border-color:rgba(248,113,113,.4); }
+  .toolbar { display:flex; flex-wrap:wrap; gap:6px; margin:0 0 8px; }
+  .thinking {
+    font-size:12px; color:var(--muted); font-style:italic; line-height:1.6; margin-bottom:8px;
+  }
+  .tmp { color:var(--muted); font-size:12px; }
+  .tmp::after { content:""; animation:dots 1.2s steps(4,end) infinite; }
+  @keyframes dots { 0%{content:""} 25%{content:"."} 50%{content:".."} 75%{content:"..."} }
+  .stop { color:var(--muted); font-size:11px; text-align:center; margin:12px 0 0; }
+  .msg.has-error .content { border-color:rgba(248,113,113,.5); color:var(--err); }
+
+  /* markdown */
+  .content { word-break:break-word; }
+  .content h1,.content h2,.content h3 { margin:.6em 0 .3em; font-weight:600; line-height:1.3; }
+  .content p { margin:.4em 0; }
+  .content ul,.content ol { margin:.4em 0; padding-left:1.4em; }
+  .content code { background:var(--panel2); padding:1px 5px; border-radius:4px; font-family:var(--mono); font-size:.87em; }
+  .content pre { background:var(--panel2); border:1px solid var(--border); padding:10px 12px;
+    border-radius:8px; overflow-x:auto; }
+  .content pre code { background:none; padding:0; }
+  .content table { border-collapse:collapse; margin:.5em 0; font-size:13px; }
+  .content th,.content td { border:1px solid var(--border); padding:5px 10px; text-align:left; }
+  .content th { background:var(--panel2); font-weight:600; }
+  .content a { color:var(--accent2); }
+
+  form {
+    display:flex; gap:10px; padding:14px 20px; border-top:1px solid var(--border); background:var(--panel);
+  }
+  #input {
+    flex:1; padding:11px 14px; border-radius:10px; border:1px solid var(--border);
+    background:var(--panel2); color:var(--fg); font-size:14px; outline:none;
+  }
+  #input:focus { border-color:var(--accent); }
+  #send { padding:0 20px; border:none; border-radius:10px; background:var(--accent); color:#fff; cursor:pointer; font-size:14px; }
+  #send:disabled { opacity:.4; cursor:not-allowed; }
+  #stop { padding:0 16px; border:1px solid var(--border); background:transparent; color:var(--muted);
+    border-radius:10px; cursor:pointer; font-size:13px; }
+  #stop:disabled { opacity:.4; }
+</style>
+</head>
+<body>
+<aside id="sidebar">
+  <div class="sb-head">
+    <span class="t">历史会话</span>
+    <button class="btn primary" id="newChat">＋ 新对话</button>
+  </div>
+  <ul id="sessions"><li class="sb-empty">暂无会话</li></ul>
+</aside>
+
+<main>
+  <header>
+    <h1>Tushare 数据助手</h1>
+    <span class="badge">DeepSeek · MCP</span>
+    <span class="hint">需代理在跑；TUSHARE_API_KEY 为空时取数会友好报错</span>
+  </header>
+  <div id="log"></div>
+  <form id="form">
+    <input id="input" placeholder="如：贵州茅台最近一个月的日线" autocomplete="off" autofocus />
+    <button id="send" type="submit">发送</button>
+    <button id="stop" type="button" disabled>停止</button>
+  </form>
+</main>
+
+<script src="/vendor/marked.min.js"></script>
+<script src="/vendor/purify.min.js"></script>
+<script>
+(function () {
+  const log = document.getElementById('log');
+  const form = document.getElementById('form');
+  const input = document.getElementById('input');
+  const send = document.getElementById('send');
+  const stop = document.getElementById('stop');
+  const sel = document.getElementById('sessions');
+  const newChat = document.getElementById('newChat');
+
+  let currentSession = null;
+  let ctrl = null;
+
+  const md = (t) => (window.marked && window.DOMPurify)
+    ? DOMPurify.sanitize(marked.parse(t || ''))
+    : escapeHtml(t || '').replace(/\n/g, '<br>');
+  const escapeHtml = (s) => s.replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const truncate = (s, n=90) => (s && s.length > n ? s.slice(0,n)+'…' : (s||''));
+  const fmtTime = (iso) => iso ? new Date(iso).toLocaleString('zh-CN', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'}) : '';
+
+  function makeBubble(role) {
+    const el = document.createElement('div');
+    el.className = 'msg ' + role;
+    const track = document.createElement('div'); track.className = 'track';
+    const content = document.createElement('div'); content.className = 'content';
+    el.appendChild(track); el.appendChild(content);
+    log.appendChild(el);
+    const b = { el, track, content, md:'', sd:null,
+      schedule() { if (this.sd) return; this.sd = requestAnimationFrame(() => { this.sd=null; this.render(); }); },
+      render() { this.content.innerHTML = md(this.md); this.scroll(); },
+      scroll() { log.scrollTop = log.scrollHeight; },
+      renderMd(t) { this.md = (t||''); this.render(); },
+      addText(t) { const tmp=this.track.querySelector('.tmp'); if(tmp) tmp.remove(); this.md += t; this.schedule(); },
+      addThinking(t) {
+        const tmp=this.track.querySelector('.tmp'); if(tmp) tmp.remove();
+        let d=this.track.querySelector('.thinking');
+        if(!d){ d=document.createElement('div'); d.className='thinking'; this.track.appendChild(d); }
+        d.textContent = (d.textContent||'') + t;
+      },
+      addTool(t) { const tmp=this.track.querySelector('.tmp'); if(tmp) tmp.remove();
+        const c=document.createElement('span'); c.className='chip '+(t.ok?'ok':'err');
+        c.textContent=(t.ok?'✔ ':'✖ ')+t.name+' '+truncate(JSON.stringify(t.input||{}),40);
+        this.track.appendChild(c); this.scroll();
+      },
+      startStreaming() { const tmp=document.createElement('span'); tmp.className='tmp'; tmp.textContent='思考中'; this.track.appendChild(tmp); },
+      setError(m) { this.md=''; this.renderMd(''); this.el.classList.add('has-error'); this.content.textContent='⚠ '+m; }
+    };
+    return b;
+  }
+
+  function handleFrame(frame, b) {
+    let ev='message', dataStr='';
+    for (const line of frame.split('\n')) {
+      if (line.startsWith('event:')) ev = line.slice(6).trim();
+      else if (line.startsWith('data:')) dataStr += line.slice(5).trim();
+    }
+    if (!dataStr) return;
+    let data; try { data = JSON.parse(dataStr); } catch (e) { return; }
+    switch (ev) {
+      case 'thinking': b.addThinking(data.text); break;
+      case 'text': b.addText(data.text); break;
+      case 'tool': b.addTool(data); break;
+      case 'done': currentSession = data.session_id; refresh(); b.scroll(); break;
+      case 'error': b.setError(data.message); break;
+    }
+  }
+
+  async function streamChat(message, b) {
+    ctrl = new AbortController(); stop.disabled = false; send.disabled = true;
+    try {
+      const res = await fetch('/chat', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({message, session_id: currentSession}),
+        signal: ctrl.signal,
+      });
+      if (!res.ok || !res.body) throw new Error('HTTP ' + res.status);
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, {stream:true});
+        let i;
+        while ((i = buf.indexOf('\n\n')) >= 0) { const f=buf.slice(0,i); buf=buf.slice(i+2); handleFrame(f,b); }
+      }
+      if (buf) handleFrame(buf, b);
+    } catch (e) {
+      if (e.name !== 'AbortError') { b.setError(String(e)); }
+    } finally {
+      ctrl = null; stop.disabled = true; send.disabled = false; input.focus();
+    }
+  }
+
+  async function refresh() {
+    const res = await fetch('/api/sessions'); const list = await res.json();
+    sel.innerHTML = '';
+    if (!list.length) { sel.innerHTML = '<li class="sb-empty">暂无会话</li>'; return; }
+    list.forEach((s) => {
+      const li = document.createElement('li');
+      if (s.session_id === currentSession) li.classList.add('active');
+      const date = document.createElement('span'); date.className='s-date'; date.textContent = fmtTime(s.created_at);
+      const cnt = document.createElement('span'); cnt.className='s-count'; cnt.textContent = s.count + ' 条';
+      const del = document.createElement('span'); del.className='s-del'; del.textContent='×';
+      del.onclick = async (e) => { e.stopPropagation(); await fetch('/api/sessions/'+s.session_id, {method:'DELETE'}); if(currentSession===s.session_id){ currentSession=null; log.innerHTML=''; } refresh(); };
+      li.append(date, cnt, del);
+      li.onclick = () => openSession(s.session_id);
+      sel.appendChild(li);
+    });
+  }
+
+  async function openSession(id) {
+    const res = await fetch('/api/sessions/' + id);
+    if (!res.ok) return;
+    const msgs = await res.json();
+    currentSession = id; log.innerHTML = '';
+    msgs.forEach((m) => {
+      if (m.role === 'user') { makeBubble('user').renderMd(m.content); }
+      else if (m.role === 'assistant') { makeBubble('assistant').renderMd(m.content); }
+      else if (m.role === 'tool') { const c=document.createElement('div'); c.className='chip '+(m.is_error?'err':'ok'); c.textContent=(m.is_error?'✖ tool → ':'✔ tool → ')+truncate(m.content,120); log.appendChild(c); }
+      else if (m.role === 'error') { const b=makeBubble('assistant'); b.renderMd(''); b.el.classList.add('has-error'); b.content.textContent='⚠ '+m.content; }
+    });
+    refresh();
+    scrollBottom();
+  }
+
+  function scrollBottom(){ log.scrollTop = log.scrollHeight; }
+
+  newChat.onclick = () => { ctrl && ctrl.abort(); currentSession = null; log.innerHTML=''; input.focus(); };
+  stop.onclick = () => ctrl && ctrl.abort();
+
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const m = input.value.trim();
+    if (!m) return;
+    input.value = '';
+    const b = makeBubble('user'); b.renderMd(m);
+    const a = makeBubble('assistant'); a.startStreaming();
+    streamChat(m, a);
+  });
+
+  refresh();
+})();
+</script>
+</body>
+</html>

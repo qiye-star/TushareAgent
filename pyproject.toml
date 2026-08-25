@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "demomcp"
+version = "0.1.0"
+description = "可扩展的 LLM+MCP 数据对话助手（DeepSeek · MCP · Web/CLI）"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1,<2",
+    "mcp>=1.28,<2",
+    "httpx>=0.28",
+    "pydantic>=2",
+    "pydantic-settings>=2.14",
+    "sqlalchemy>=2.0",
+    "aiosqlite>=0.20",
+    "fastapi>=0.136",
+    "uvicorn>=0.48",
+]
+
+# 开发工具（本地 uv sync 安装；容器用 uv sync --no-dev 跳过）
+[dependency-groups]
+dev = [
+    "pytest>=9",
+    "pytest-asyncio>=1.4",
+    "ruff>=0.16,<0.17",
+    "pyright>=1.1.411",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["demomcp*", "mcp_server*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+
+[[tool.uv.index]]
+name = "aliyun"
+default = true
+url = "https://mirrors.aliyun.com/pypi/simple"
+
+[[tool.uv.index]]
+name = "huawei"
+url = "http://repo.huaweicloud.com/repository/pypi/simple"

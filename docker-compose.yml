@@ -1,0 +1,18 @@
+# demo-mcp — 一键起 Web 控制台。
+# demo-mcp 自带 MCP server，需要外部一个 Tushare 数据代理（.env 里 TUSHARE_PROXY_URL / TUSHARE_API_KEY）。
+services:
+  demo:
+    build: .
+    ports:
+      - "8010:8010"
+    env_file:
+      - .env            # DS_API_KEY / DS_MODEL / TUSHARE_PROXY_URL / TUSHARE_API_KEY 等
+    environment:
+      # 会话历史用 SQLite，且放进 volume 便于持久化；MCP_SERVER_PATH 留空=用内置 /app/mcp_server/server.py
+      DEMO_DATABASE_URL: sqlite+aiosqlite:////app/data/demo.db
+    volumes:
+      - demo_data:/app/data
+    restart: unless-stopped
+
+volumes:
+  demo_data:

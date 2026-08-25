@@ -1,0 +1,8 @@
+# demo-mcp 本地忽略（根 .gitignore 已按任一层级覆盖 .env/.venv/*.db/__pycache__/，这里补构建产物）
+*.egg-info/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.db
+.env
+.venv/
