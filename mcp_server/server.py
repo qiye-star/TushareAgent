@@ -1,18 +1,25 @@
 """Tushare 数据代理 MCP Server（demo-mcp 内置）。
 
-独立进程、经 HTTP 复用 Tushare 数据代理的缓存/鉴权/错误提示，把下列工具暴露给 demo-mcp agent。
-本模块只依赖 mcp + httpx；把 TUSHARE_* 环境变量看成外部配置，不 import 本包其它模块。
+作为**独立 HTTP 服务**（FastMCP streamable-http）运行，经 HTTP 复用 Tushare 数据代理的缓存/鉴权/错误提示，
+把数据接口暴露成工具给 demo-mcp agent。启动时从代理注册表枚举全部接口，为每个接口注册一个 tool
+（tool 名 = 接口名，如 daily / stock_basic），agent 按接口自选；另保留 list_apis / get_api_info / query
+作为基础兜底。本模块只依赖 mcp + httpx；把 TUSHARE_* / MCP_SERVER_* 环境变量看成外部配置，不 import 本包其它模块。
 
 环境变量：
     TUSHARE_PROXY_URL        代理地址（默认 http://127.0.0.1:8000）
     TUSHARE_API_KEY          代理分发的 api_key（空则 query 返回 HTTP 401→ProxyError）
     TUSHARE_PROXY_TIMEOUT    每次请求超时秒数（默认 20）
+    MCP_SERVER_HOST          本 HTTP 服务监听地址（默认 127.0.0.1）
+    MCP_SERVER_PORT          本 HTTP 服务监听端口（默认 8765）
+
+客户端用 `mcp.client.streamable_http.streamablehttp_client` 连 `http://<host>:<port>/mcp`。
 
 注意：MCP SDK 新版 2.x 已移除 mcp.server.fastmcp.FastMCP，故依赖钉在 mcp>=1.28,<2。
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any
 
@@ -22,8 +29,10 @@ from mcp.server.fastmcp import FastMCP
 PROXY_URL = os.environ.get("TUSHARE_PROXY_URL", "http://127.0.0.1:8000").rstrip("/")
 API_KEY = os.environ.get("TUSHARE_API_KEY", "").strip()
 TIMEOUT = float(os.environ.get("TUSHARE_PROXY_TIMEOUT", "20"))
+HOST = os.environ.get("MCP_SERVER_HOST", "127.0.0.1")
+PORT = int(os.environ.get("MCP_SERVER_PORT", "8765"))
 
-mcp = FastMCP("tushare-proxy")
+mcp = FastMCP("tushare-proxy", host=HOST, port=PORT, streamable_http_path="/mcp")
 
 
 class ProxyError(RuntimeError):
@@ -148,5 +157,63 @@ async def query(
             raise ProxyError(f"MCP 代理不可达或响应异常（{PROXY_URL}）：{exc}") from exc
 
 
+# ---------------------------------------------------------------------------
+# 每接口一个工具：启动时枚举注册表并为每个接口注册一个绑定了具体 api_name 的工具。
+# ---------------------------------------------------------------------------
+def _build_desc(api: dict[str, Any]) -> str:
+    """从注册表元数据生成精简工具描述（title + 必填参数名），控制 LLM context 体积。"""
+    title = api.get("title", "") or ""
+    params = api.get("params") or {}
+    required = sorted([name for name, meta in params.items() if isinstance(meta, dict) and meta.get("required")])
+    base = title if title else api.get("api_name", "")
+    if required:
+        return f"{base}。必填参数：{', '.join(required)}。"
+    return base
+
+
+def _make_tool(api: dict[str, Any]):
+    """为单个接口生成一个绑定 api_name 的异步工具函数（入参与通用 query 一致）。"""
+    api_name = api["api_name"]
+
+    async def tool(params: dict[str, Any] | None = None, fields: str | None = None) -> dict[str, Any]:
+        async with _new_client() as client:
+            try:
+                return await do_query(client, API_KEY, api_name, params or {}, fields)
+            except httpx.HTTPError as exc:
+                raise ProxyError(f"MCP 代理不可达或响应异常（{PROXY_URL}）：{exc}") from exc
+
+    tool.__name__ = api_name
+    return tool
+
+
+async def _fetch_all_apis() -> list[dict[str, Any]]:
+    async with _new_client() as client:
+        return await do_list_apis(client, q="", limit=300)
+
+
+def _register_interface_tools() -> None:
+    """启动前枚举注册表并为每个接口注册工具；代理不可达时不阻塞，只暴露基础三工具。"""
+    try:
+        apis = asyncio.run(_fetch_all_apis())
+    except Exception as exc:  # noqa: BLE001 - 启动阶段兜底：注册失败不阻断服务器启动
+        print(f"[mcp-server] 注册表拉取失败，仅暴露基础工具：{exc}")
+        return
+    for api in apis:
+        api_name = api.get("api_name")
+        if not api_name:
+            continue
+        try:
+            mcp.add_tool(
+                _make_tool(api),
+                name=api_name,
+                title=api.get("title"),
+                description=_build_desc(api),
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[mcp-server] 注册接口失败：{api_name}：{exc}")
+
+
 if __name__ == "__main__":
-    mcp.run()  # 默认 stdio 传输
+    # 注册表副本仅供调试输出；真实服务以 streamable-http 暴露给客户端。
+    _register_interface_tools()
+    mcp.run(transport="streamable-http")

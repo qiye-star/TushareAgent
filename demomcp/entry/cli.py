@@ -11,11 +11,11 @@ import sys
 import uuid
 
 from demomcp.agents.agent import Agent
-from demomcp.config.env import build_stdio_params
 from demomcp.config.settings import Settings
 from demomcp.db.store import build_store
 from demomcp.providers.llm.deepseek import DeepSeekLLMClient
 from demomcp.providers.tools.mcp import mcp_tool_provider
+from demomcp.providers.tools.stocks import StockToolProvider
 
 
 async def main() -> int:
@@ -25,30 +25,22 @@ async def main() -> int:
             "DS_API_KEY 未配置：请在 demo-mcp/.env 设置 DeepSeek 的 API key，再用真 key 跑通。\n"
         )
         return 2
-    if not settings.tushare_api_key:
-        sys.stderr.write(
-            "提示：TUSHARE_API_KEY 为空，query 可能返回 401；list_apis / get_api_info 可正常用。\n"
-        )
 
     llm = DeepSeekLLMClient(
         api_key=settings.ds_api_key,
         base_url=settings.ds_base_url or None,
         model=settings.ds_model or None,
     )
-    params = build_stdio_params(
-        tushare_proxy_url=settings.tushare_proxy_url,
-        tushare_api_key=settings.tushare_api_key,
-        tushare_proxy_timeout=settings.tushare_proxy_timeout,
-        mcp_python=settings.mcp_python,
-        mcp_server_path=settings.mcp_server_path,
-        mcp_args=settings.mcp_args,
-    )
     store = build_store(settings.effective_database_url)
 
     try:
         await store.init()
-        async with mcp_tool_provider(params) as tools:
-            agent = Agent(llm=llm, tools=tools, config=settings)
+        async with mcp_tool_provider(
+            settings.tushare_mcp_url, timeout=settings.mcp_timeout, retries=settings.mcp_retries
+        ) as tools:
+            # 语义工具层：包裹底层 MCP，只暴露双票限定语义工具（隐藏通用 query/list_apis/get_api_info）
+            stock_tools = StockToolProvider(tools, config=settings)
+            agent = Agent(llm=llm, tools=stock_tools, config=settings)
             session_id = uuid.uuid4().hex
             history: list[dict] = []
 

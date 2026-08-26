@@ -17,6 +17,17 @@ dependencies = [
     "aiosqlite>=0.20",
     "fastapi>=0.136",
     "uvicorn>=0.48",
+    "langgraph>=1.2.11",
+]
+
+# RAG 财报知识库后端（可选：仅在需要 PyMuPDF / 词法检索时安装）
+# 嵌入走 OpenAI 兼容 /embeddings API（服务端 bge-m3），本地不加载 torch/模型，故无需 sentence-transformers/faiss
+# 不进入默认 dependencies；用 uv sync --extra rag-full 安装
+[project.optional-dependencies]
+rag-full = [
+    "pymupdf>=1.24",
+    "rank-bm25>=0.2.2",
+    "jieba>=0.42",
 ]
 
 # 开发工具（本地 uv sync 安装；容器用 uv sync --no-dev 跳过）

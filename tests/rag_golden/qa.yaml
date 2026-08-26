@@ -1,0 +1,32 @@
+# RAG 离线评估标注集（小规模；对应 scripts/eval_rag.py 的合成语料：比亚迪/宁德时代 2024 年报）
+# 每题含 gold 溯源：doc_id / section_path / page / table_caption
+questions:
+  - question: "比亚迪 2024 年研发投入占营业收入比例是多少？"
+    company: "比亚迪"
+    year: 2024
+    strategy: auto
+    gold:
+      doc_id: fy2024_byd
+      section_path: ["第三节 管理层讨论与分析", "3.2 研发投入"]
+      page: 1
+      table_caption: "表 12 比亚迪研发投入"
+
+  - question: "宁德时代研发投入情况如何？"
+    company: "宁德时代"
+    year: 2024
+    strategy: auto
+    gold:
+      doc_id: fy2024_catl
+      section_path: ["第三节 管理层讨论与分析", "3.2 研发投入"]
+      page: 1
+      table_caption: "表 12 宁德时代研发投入"
+
+  - question: "主营业务构成中研发投入占比是多少？"
+    company: "比亚迪"
+    year: 2024
+    strategy: structural
+    gold:
+      doc_id: fy2024_byd
+      section_path: ["第三节 管理层讨论与分析", "3.2 研发投入"]
+      page: 1
+      table_caption: "表 12 比亚迪研发投入"

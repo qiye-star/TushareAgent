@@ -1,11 +1,8 @@
-"""配置层离线测试：Settings 读取 + 项目根 + MCP stdio 参数 + DB URL。"""
+"""配置层离线测试：Settings 读取 + 项目根 + MCP URL + DB URL。"""
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-from demomcp.config.env import PROJECT_ROOT, build_stdio_params
+from demomcp.config.env import PROJECT_ROOT
 from demomcp.config.settings import DEFAULT_SYSTEM_PROMPT
 
 
@@ -17,7 +14,6 @@ def test_settings_defaults_offline(make_settings) -> None:
     assert s.ds_streaming is True
     assert s.max_iterations == 10
     assert s.system_prompt == DEFAULT_SYSTEM_PROMPT
-    assert s.tushare_proxy_url == "http://127.0.0.1:8000"
     assert s.mcp_timeout == 30.0
     assert s.mcp_retries == 2
     assert s.is_configured is False
@@ -38,9 +34,11 @@ def test_settings_from_env(make_settings, monkeypatch) -> None:
     assert s.is_configured is True
 
 
-def test_project_root_is_demo_mcp() -> None:
+def test_project_root_is_repo_root() -> None:
+    # PROJECT_ROOT 由 demomcp/config/env.py 的 parents[2] 推导，应指向仓库根（不依赖所在目录名）
     assert PROJECT_ROOT.is_absolute()
-    assert PROJECT_ROOT.name == "demo-mcp"
+    assert (PROJECT_ROOT / "pyproject.toml").is_file()
+    assert (PROJECT_ROOT / "demomcp").is_dir()
 
 
 def test_effective_database_url_fallback(make_settings) -> None:
@@ -53,26 +51,12 @@ def test_effective_database_url_override(make_settings) -> None:
     assert s.effective_database_url == "sqlite+aiosqlite:///tmp/chat.db"
 
 
-def test_build_stdio_params_defaults_to_builtin_server() -> None:
-    p = build_stdio_params(tushare_proxy_url="http://127.0.0.1:8000", tushare_api_key="k123")
-    assert p.args is not None
-    # 未指定 MCP_SERVER_PATH → 内置的 demo-mcp/mcp_server/server.py（自包含，无父路径）
-    assert Path(p.args[0]) == PROJECT_ROOT / "mcp_server" / "server.py"
-    assert Path(p.args[0]).exists()
-    assert p.command == sys.executable  # 未指定 MCP_PYTHON → 当前解释器
-    assert p.env is not None
-    assert p.env["TUSHARE_API_KEY"] == "k123"
-    assert p.env["TUSHARE_PROXY_URL"] == "http://127.0.0.1:8000"
+def test_tushare_mcp_url_default(make_settings) -> None:
+    s = make_settings()
+    assert s.tushare_mcp_url == "https://api.tushare.pro/mcp/"
 
 
-def test_build_stdio_params_config_driven_override() -> None:
-    p = build_stdio_params(
-        tushare_proxy_url="http://127.0.0.1:8000",
-        tushare_api_key="k123",
-        tushare_proxy_timeout=5.0,
-        mcp_server_path=str(PROJECT_ROOT / "mcp_server" / "server.py"),
-    )
-    assert p.args is not None
-    assert Path(p.args[0]) == PROJECT_ROOT / "mcp_server" / "server.py"
-    assert p.env is not None
-    assert p.env["TUSHARE_PROXY_TIMEOUT"] == "5.0"
+def test_tushare_mcp_url_from_env(make_settings, monkeypatch) -> None:
+    monkeypatch.setenv("TUSHARE_MCP_URL", "http://10.0.0.1:9000/mcp")
+    s = make_settings()
+    assert s.tushare_mcp_url == "http://10.0.0.1:9000/mcp"

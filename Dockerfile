@@ -1,5 +1,6 @@
 # demo-mcp — LLM+MCP 数据对话助手（Web/CLI）
-# 构建上下文只含 demo-mcp/（零外部路径）。容器内置 MCP server，连外部 TUSHARE_PROXY_URL 的代理。
+# 构建上下文只含 demo-mcp/（零外部路径）。应用经 TUSHARE_MCP_URL 连接 Tushare 官方 MCP；
+# 内置 mcp_server/（本地代理→每接口工具）默认停用，仅作后备。
 FROM python:3.11-slim
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
@@ -22,5 +23,5 @@ RUN uv sync --no-dev && \
 USER app
 
 EXPOSE 8010
-# 用容器内 demo-mcp 自带 .venv 跑 Web（agent 启动 MCP server 时用同一解释器）
+# 用容器内 demo-mcp 自带 .venv 跑 Web；MCP 经 .env 的 TUSHARE_MCP_URL 连官方 Tushare MCP
 CMD ["uv", "run", "uvicorn", "demomcp.entry.web:app", "--host", "0.0.0.0", "--port", "8010"]

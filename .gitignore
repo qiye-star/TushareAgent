@@ -6,3 +6,9 @@ __pycache__/
 *.db
 .env
 .venv/
+
+# web 构建产物 / 依赖（前端已迁到 node_modules；vendored 改为本地不提交、由 CDN 兜底）
+web/node_modules/
+web/dist/
+web/.vite/
+web/vendor/

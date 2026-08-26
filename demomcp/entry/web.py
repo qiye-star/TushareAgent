@@ -1,6 +1,6 @@
 """入口层 · Web：SSE 流式聊天 + 会话日志 API，并托管聊天页。
 
-- POST /chat 返回 SSE（thinking/text/tool/done/error），逐字流式，并把会话历史落到 demo-mcp 自己的库。
+- POST /chat 返回 SSE（thinking/text/tool_call/tool_result/done/error），逐字流式，并把会话历史落到 demo-mcp 自己的库。
 - GET /api/sessions、GET /api/sessions/{id} 供侧栏历史会话 / 日志查看 / 恢复。
 - store 在 lifespan 里复用（避免每请求建表/建引擎）。
 
@@ -24,11 +24,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from demomcp.agents.agent import Agent
-from demomcp.config.env import build_stdio_params
 from demomcp.config.settings import Settings
 from demomcp.db.store import ChatHistoryStore, build_store
 from demomcp.providers.llm.deepseek import DeepSeekLLMClient
 from demomcp.providers.tools.mcp import mcp_tool_provider
+from demomcp.providers.tools.stocks import StockToolProvider
 
 WEB_DIR = Path(__file__).resolve().parents[2] / "web"
 
@@ -52,6 +52,7 @@ app = FastAPI(title="Tushare demo-mcp", lifespan=lifespan)
 class ChatRequest(BaseModel):
     message: str
     session_id: str | None = None
+    model: str | None = None  # 前端「深度思考」可传 deepseek-reasoner
 
 
 def _sse(kind: str, data: dict[str, Any]) -> str:
@@ -78,28 +79,23 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         await emit("thinking", {"text": text})
 
     async def on_tool(name: str, arguments: dict[str, Any], result: Any) -> None:
-        await emit("tool", {"name": name, "input": arguments, "ok": not result.is_error})
+        await emit("tool_call", {"name": name, "input": arguments})
+        await emit("tool_result", {"name": name, "content": result.content, "ok": not result.is_error})
         await store.append(session_id, "tool", result.content, is_error=result.is_error)
 
     async def _run_agent() -> None:
         llm = DeepSeekLLMClient(
             api_key=settings.ds_api_key,
             base_url=settings.ds_base_url or None,
-            model=settings.ds_model or None,
-        )
-        params = build_stdio_params(
-            tushare_proxy_url=settings.tushare_proxy_url,
-            tushare_api_key=settings.tushare_api_key,
-            tushare_proxy_timeout=settings.tushare_proxy_timeout,
-            mcp_python=settings.mcp_python,
-            mcp_server_path=settings.mcp_server_path,
-            mcp_args=settings.mcp_args,
+            model=(req.model or settings.ds_model) or None,
         )
         try:
             async with mcp_tool_provider(
-                params, timeout=settings.mcp_timeout, retries=settings.mcp_retries
+                settings.tushare_mcp_url, timeout=settings.mcp_timeout, retries=settings.mcp_retries
             ) as tools:
-                agent = Agent(llm=llm, tools=tools, config=settings)
+                # 语义工具层：包裹底层 MCP，只暴露双票限定语义工具（隐藏通用 query/list_apis/get_api_info）
+                stock_tools = StockToolProvider(tools, config=settings)
+                agent = Agent(llm=llm, tools=stock_tools, config=settings)
                 result = await agent.run(
                     req.message,
                     history=history,

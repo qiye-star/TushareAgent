@@ -57,3 +57,4 @@ class AgentResult:
     messages: list[dict[str, Any]] = field(default_factory=list)
     tool_results: list[ToolResult] = field(default_factory=list)
     usage: dict[str, Any] | None = None
+    citations: list[str] = field(default_factory=list)

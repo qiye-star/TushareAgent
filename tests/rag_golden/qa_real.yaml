@@ -1,0 +1,47 @@
+# 真实年报金标（比亚迪 2025 年年度报告）——基于解析结构的真实事实位置
+# doc_id = PDF 文件名 stem（eval --corpus 单文件时）；section_path 为摄取器产出的真实路径（含根标题「2025 年年度报告」前缀）
+questions:
+  - question: "比亚迪 2025 年归属于上市公司股东的净利润是多少？"
+    company: "比亚迪"
+    year: 2025
+    strategy: auto
+    gold:
+      doc_id: "比亚迪：2025年年度报告"
+      section_path: ["2025 年年度报告", "第二节 公司简介和主要财务指标", "六、主要会计数据和财务指标"]
+      page: 11
+
+  - question: "比亚迪 2025 年主营业务收入构成如何？"
+    company: "比亚迪"
+    year: 2025
+    strategy: auto
+    gold:
+      doc_id: "比亚迪：2025年年度报告"
+      section_path: ["2025 年年度报告", "第三节 管理层讨论与分析", "2.2 手机部件及组装业务", "四、主营业务分析"]
+      page: 29
+
+  - question: "比亚迪 2025 年毛利率和经营情况如何？"
+    company: "比亚迪"
+    year: 2025
+    strategy: auto
+    gold:
+      doc_id: "比亚迪：2025年年度报告"
+      section_path: ["2025 年年度报告", "第三节 管理层讨论与分析", "2.2 手机部件及组装业务", "四、主营业务分析"]
+      page: 29
+
+  - question: "比亚迪 2025 年研发投入情况如何？"
+    company: "比亚迪"
+    year: 2025
+    strategy: auto
+    gold:
+      doc_id: "比亚迪：2025年年度报告"
+      section_path: ["2025 年年度报告", "第三节 管理层讨论与分析", "二、报告期内公司所处行业情况"]
+      page: 14
+
+  - question: "比亚迪 2025 年营业收入主要来自哪些业务？"
+    company: "比亚迪"
+    year: 2025
+    strategy: auto
+    gold:
+      doc_id: "比亚迪：2025年年度报告"
+      section_path: ["2025 年年度报告", "第三节 管理层讨论与分析", "2.2 手机部件及组装业务", "四、主营业务分析"]
+      page: 29

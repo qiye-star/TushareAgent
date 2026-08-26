@@ -41,6 +41,18 @@ class _BusinessError:
         return CallToolResult(content=[TextContent(type="text", text="无权限")], isError=True)
 
 
+class _BusinessNoPermission:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def call_tool(self, name, arguments=None, read_timeout_seconds=None):
+        self.calls += 1
+        return CallToolResult(
+            content=[TextContent(type="text", text='{"code": 1, "msg": "参数缺失", "row_count": 0, "data": []}')],
+            isError=False,
+        )
+
+
 async def test_call_tool_retries_then_succeeds() -> None:
     s = _FlakySession(fails=2)
     provider = MCPToolProvider(s, timeout=30.0, retries=3)
@@ -60,10 +72,19 @@ async def test_call_tool_exhausts_retries() -> None:
     assert s.calls == 2
 
 
-async def test_business_error_not_retried() -> None:
+async def test_business_permission_error_retried_then_friendly_message() -> None:
     s = _BusinessError()
     provider = MCPToolProvider(s, retries=3)
     result = await provider.call_tool("query", {})
-    assert result.is_error is True
-    assert result.content == "无权限"
-    assert s.calls == 1  # isError 是业务结果，不重试
+    assert result.is_error is False  # 权限类失败转友好提示（非错误），由 LLM 如实转述
+    assert "积分不足" in result.content
+    assert s.calls == 3  # 业务失败也重试
+
+
+async def test_business_nonpermission_retried_then_raw_result() -> None:
+    s = _BusinessNoPermission()
+    provider = MCPToolProvider(s, retries=2)
+    result = await provider.call_tool("daily", {})
+    assert result.is_error is False  # 非权限类业务失败 → 保留原始结果（含 code/msg）
+    assert '"code": 1' in result.content
+    assert s.calls == 2
