@@ -41,6 +41,7 @@ def _regex_level(text: str) -> int | None:
 
 _TOC_MARKERS = {"目录", "CONTENTS"}
 _TOC_ENTRY_RE = re.compile(r"[。.…··]{3,}\s*\d+\s*$")
+_HEADER_REPEAT_PAGES = 5  # 同一短文本出现在 ≥5 个不同页 → 视为 running header（页眉/页脚标题），非真标题
 
 
 def _is_toc_entry(text: str) -> bool:
@@ -54,6 +55,12 @@ def _is_toc_entry(text: str) -> bool:
 def _is_toc_marker(text: str) -> bool:
     """目录页标记（不含空格归一化）。"""
     return text.strip().replace(" ", "") in _TOC_MARKERS
+
+
+def _is_running_header(text: str, page_counts: dict[str, set[int]]) -> bool:
+    """跨多页重复的短文本（如报告标题作页眉/页脚）不是真标题。"""
+    pages = page_counts.get(text)
+    return bool(pages) and len(pages) >= _HEADER_REPEAT_PAGES
 
 
 def cluster_font_sizes(sizes: list[float], *, eps: float = 0.5) -> list[tuple[float, int]]:
@@ -93,6 +100,14 @@ def detect_headings(
     clusters = cluster_font_sizes(text_sizes)
     body_level = _level_for_size(body_size, clusters)
 
+    # running-header 过滤：统计每个短文本出现的不同页数；跨页重复者为页眉/页脚
+    page_counts: dict[str, set[int]] = {}
+    for b in blocks:
+        if b.kind == "text":
+            t = b.text.strip()
+            if t and len(t) <= 80:
+                page_counts.setdefault(t, set()).add(b.page)
+
     candidates: list[HeadingCandidate] = []
     prev_key: tuple[int, int] | None = None  # (page, level) 去重连续同级
 
@@ -105,12 +120,21 @@ def detect_headings(
             prev_key = None
             continue
         stripped = block.text.strip()
+        # 跨多页重复的短标题 = running header（页眉/页脚），不作为标题
+        if _is_running_header(stripped, page_counts):
+            prev_key = None
+            continue
         regex_level = _regex_level(block.text)
         font_heading = _level_for_size(block.size, clusters) < body_level
         distinct = (block.size - body_size) >= 1.5
 
         # 长文本段落（即使以编号开头）不是标题：非大字号的长块一律否决，避免正文被误判为子标题
         if len(stripped) > 50 and not distinct:
+            prev_key = None
+            continue
+
+        # 含句读的正文片段（如「3.0 Evo」打造，标配「天神之眼C」…」）不是标题：真实标题（第X节/3.2/一、）不含 ，；。
+        if any(p in stripped for p in "，；。"):
             prev_key = None
             continue
 

@@ -111,7 +111,8 @@ async def test_threshold_filters_low_scores(make_settings) -> None:
     await ingest(s, index=index, doc_meta=_docmeta("fy2024_byd", "比亚迪", "002594.SZ", "比亚迪 2024 年报"), layout=_layout("研发投入占营业收入比例百分之五。", "表 12"))
     retriever = HybridRetriever(index=index, config=s)
     chunks = await retriever.retrieve(RetrievalPlan(rewritten_query="研发投入"))
-    assert chunks == []  # RRF 分数 ~1/60 量级，恒低于 0.999
+    # 阈值过滤掉低分段落；但命中节的表格块被「表格保底」保留（财务数值常在此，不被阈值误杀）
+    assert chunks and all(c.metadata.get("block_type") == "table" for c in chunks)
 
 
 async def test_strategy_route_smoke(make_settings) -> None:
@@ -121,3 +122,24 @@ async def test_strategy_route_smoke(make_settings) -> None:
         chunks = await retriever.retrieve(plan)
         assert len(chunks) > 0, f"strategy={strategy} 应有返回"
         assert retriever.last_plan is plan
+
+
+class _BoomReranker:
+    def rerank(self, query, candidates):
+        raise ConnectionError("rerank boom")
+
+
+async def test_rerank_failure_falls_back_to_rrf(make_settings) -> None:
+    """rerank API 失败 → 回退 RRF 序并跳过阈值（不再整路置空为无证据）。"""
+    s = make_settings(rag_embedding_model="hashing", rag_rerank_threshold=0.999)  # 阈值极高：正常会清空
+    index = build_index(s)
+    await ingest(
+        s, index=index,
+        doc_meta=_docmeta("fy2024_byd", "比亚迪", "002594.SZ", "比亚迪 2024 年报"),
+        layout=_layout("研发投入占营业收入比例百分之五。", "表 12"),
+    )
+    retriever = HybridRetriever(index=index, reranker=_BoomReranker(), config=s)
+    seen: dict = {}
+    chunks = await retriever.retrieve(RetrievalPlan(rewritten_query="研发投入"), on_funnel=seen.update)
+    assert chunks  # 即使 threshold=0.999 也返回 top_k（兜底去阈值）
+    assert seen.get("rerank_degraded") is True

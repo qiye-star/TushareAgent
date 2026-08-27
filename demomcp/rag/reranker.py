@@ -49,7 +49,7 @@ class ApiReranker:
                 "model": self.model, "query": query,
                 "documents": [c.text for c in candidates], "top_n": len(candidates),
             },
-            timeout=30.0,
+            timeout=20.0,
         )
         resp.raise_for_status()
         results = sorted(resp.json().get("results", []), key=lambda r: r["index"])

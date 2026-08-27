@@ -24,15 +24,38 @@ class Agent:
         self._config = config
         self._tool_defs: list[Any] | None = None
         self._graph: Any | None = None
+        self._retriever: Any | None = None
 
     async def _get_tool_defs(self) -> list[Any]:
         if self._tool_defs is None:
             self._tool_defs = await self._tools.list_tools()
         return self._tool_defs
 
+    async def _get_retriever(self) -> Any | None:
+        """懒加载 + 兜底：RAG_HTTP_URL 时用 HTTP 远端检索（该进程不再打开 Milvus）；
+        否则构建运行时 retriever，失败回退 None（图上不接 RAG，不崩）。"""
+        if self._retriever is None:
+            cfg = self._config
+            if cfg.rag_http_url:
+                from demomcp.rag.http_retriever import HttpRetriever
+
+                self._retriever = HttpRetriever(
+                    cfg.rag_http_url, timeout=cfg.rag_http_timeout, token=cfg.rag_http_token
+                )
+                return self._retriever
+            try:
+                from demomcp.rag.runtime import build_runtime_retriever
+
+                self._retriever = await build_runtime_retriever(cfg)
+            except Exception as exc:  # noqa: BLE001 - RAG 构建失败仅回退无检索
+                print(f"[agent] RAG retriever 构建失败，回退无检索：{exc}")
+                self._retriever = None
+        return self._retriever
+
     async def _get_graph(self) -> Any:
         if self._graph is None:
             tool_defs = await self._get_tool_defs()
+            retriever = await self._get_retriever()
             self._graph = build_research_graph(
                 self._llm,
                 self._tools,
@@ -40,6 +63,7 @@ class Agent:
                 max_tokens=self._config.ds_max_tokens,
                 disclaimer=self._config.disclaimer,
                 base_system=self._config.system_prompt,
+                retriever=retriever,
             )
         return self._graph
 
@@ -51,6 +75,7 @@ class Agent:
         on_text=None,
         on_thinking=None,
         on_tool=None,
+        on_process=None,
     ) -> AgentResult:
         messages = list(history or []) + [{"role": "user", "content": user_input}]
         state: GraphState = {
@@ -68,7 +93,7 @@ class Agent:
         try:
             result = await graph.ainvoke(
                 state,
-                config={"configurable": {"on_text": on_text, "on_thinking": on_thinking, "on_tool": on_tool}},
+                config={"configurable": {"on_text": on_text, "on_thinking": on_thinking, "on_tool": on_tool, "on_process": on_process}},
             )
         except Exception as exc:  # noqa: BLE001 - 图异常（含 ExceptionGroup）归一为优雅结果；不捕 BaseException(取消)
             return AgentResult(
@@ -85,4 +110,5 @@ class Agent:
             tool_results=result.get("tool_results") or [],
             usage=result.get("usage"),
             citations=result.get("citations") or [],
+            structured=result.get("structured"),
         )

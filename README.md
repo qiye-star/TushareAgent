@@ -1,6 +1,8 @@
 # demo-mcp：可扩展的 LLM+MCP 数据对话助手
 
-demo-mcp 是一个 **LLM + MCP** 数据对话助手：你用自然语言提问，内置的智能体会自己决定调用哪个工具、从 Tushare 数据代理取数，**并同时检索 RAG 财报知识库**，最后总结成带**确定性引用**的中文回答。支持 **CLI 终端** 与 **Web 控制台**（流式输出、思考轨迹、工具卡、Markdown、会话日志与恢复）。编排基于 **LangGraph 五节点状态机**，附一个**已对接实时循环**的 RAG 财报知识库（离线优先）。
+demo-mcp 是一个 **LLM + MCP** 数据对话助手：用自然语言提问，内置智能体自动决定调用哪个工具、从 **Tushare 官方 MCP** 取数，并**并行检索 RAG 财报知识库**，最后综合成带**确定性引用**的中文回答——支持 **CLI** 与 **Web 控制台**（流式输出、思考轨迹、工具卡、会话日志与恢复）。核心编排为 **LangGraph 五节点状态机**（router → rewrite_query → tool_rag → synthesizer / fallback，图上无回环）；RAG 财报知识库面向 A 股年报 PDF（离线优先、已对接实时循环、可评估）。
+
+> ✅ **当前质量状态（2026-08-27 实测）**：pytest **169 项零失败**；RAG 离线门禁全达标（recall@k **1.0** / faithfulness **0.9** / 跨公司隔离 **1.0**）；真引擎 BYD/CATL recall **8/8**、双向隔离 ✅、EXIT 0；E2E 数值与官方 MCP 直查**逐位一致**；**总评分 89.4 / 100**（唯一余留：表格溯源 0/2）— 见 [TEST_REPORT.md](docs/TEST_REPORT.md)。
 
 - **LLM 后端 DeepSeek**（OpenAI 兼容端点，可换）；工具调度、错误处理都在本地。
 - **自带 uv 环境**：`uv sync` 生成项目自己的 `.venv`，独立运行、互不干扰。
@@ -22,6 +24,7 @@ demo-mcp 是一个 **LLM + MCP** 数据对话助手：你用自然语言提问�
 | [RAG_FINANCE.md](docs/RAG_FINANCE.md) | **RAG 设计蓝图**（含「实现状态（截至 2026-08-27）」核对表）：**为什么**混合检索、如何保证引用不编造、评估门禁标准；含未来项（hyDE、质量自检回环等） | 想改检索算法/评估的开发者 |
 | [tool-call-layer.md](docs/tool-call-layer.md) | **语义工具层设计**（已按设计实现）：双票限定、4 个语义工具、参数归一化、is_error 错误语义、JSON 输出契约 | 扩展工具层的开发者 |
 | [UPLOAD_GUIDE.md](docs/UPLOAD_GUIDE.md) | **一键上传云服务器**：`scripts/sync_deploy.ps1` 的 `-Setup`/`-Mirror`/`-DryRun`/`-Check` 模式与排障（rclone + SSH 密钥） | 部署/运维 |
+| [TEST_REPORT.md](docs/TEST_REPORT.md) | **测试报告（2026-08-27，3 次测试 + 量化评分卡）**：pytest 169 项全量、RAG 离线评估 5 项指标、真引擎验证（达标：BYD/CATL recall 1.00、隔离 ✅；余留：表格溯源 0/2）、真实端到端冒烟（数值与官方 MCP 直查一致）、**总评分 89.4/100** | 关注质量门禁的历史记录 |
 
 > `docs/` 目录内另有 3 份年报 PDF（语料样本，**非文档**）。
 
@@ -102,20 +105,32 @@ uv sync --extra rag-full                                    #（可选）装 RAG
 
 ## Docker 运行
 
+**前置**：Docker Desktop 已启动（`docker info` 能连上 engine）；`.env` 已填好 `DS_API_KEY` / `TUSHARE_MCP_URL`（含 token）；宿主端口 `8010` 未被占用。
+
 ```bash
 cd demo-mcp
-cp .env.example .env        # 填 DS_API_KEY / TUSHARE_MCP_URL（含 token）等
-docker compose up           # 构建镜像并启动 Web，打开 http://localhost:8010
+cp .env.example .env        # 填 DS_API_KEY / TUSHARE_MCP_URL（含 token）等必需项
+docker compose up           # 一键：构建(两阶段) + 启动 Web，打开 http://localhost:8010
 ```
 
-或手动：
+- **构建（两阶段）**：`node:20-alpine` 先出 `web/dist` 静态资源 → `python:3.11-slim` 装 `uv` 运行时，`uv run uvicorn demomcp.entry.web:app`（`0.0.0.0:8010`）。`web.py` 直接托管 `web/dist`。
+- `.env` 经 `env_file` 注入；会话历史用 SQLite，写进卷 `demo_data`（容器内 `/app/data`），`demo.db` 与 RAG `data/vectorstore/` 同卷持久化。
+- `.dockerignore` 已排除 `.env / .venv / web/dist / demo.db / *.db / docs`，构建上下文干净。
+
+不走 compose、单独跑：
 
 ```bash
 docker build -t demo-mcp .
-docker run --rm -p 8010:8010 --env-file .env demo-mcp
+# 用卷持久化历史库（/app/data），把宿主 8010 映射到容器 8010
+docker run --rm -p 8010:8010 --env-file .env \
+  -e DEMO_DATABASE_URL=sqlite+aiosqlite:////app/data/demo.db \
+  -v demo_data:/app/data demo-mcp
 ```
 
-> `docker compose up` 启动 Web；`demo` 经 `.env` 的 `TUSHARE_MCP_URL` 连接 Tushare 官方 MCP。会话历史库通过卷 `demo_data` 持久化到 `/app/data/demo.db`（RAG 向量库同卷）。
+> **端口冲突**：若宿主 `8010` 已被本地实例占用，换宿主端口——`docker run -p 8011:8010 ...`，或把 `docker-compose.yml` 的 `"8010:8010"` 改成如 `"8011:8010"`。
+> **健康检查**：`curl http://localhost:8010/api/sessions`（返回 `[]` 表示已就绪）。
+> **日志**：`docker compose logs -f demo`（应用 stdout）。对话文本日志在容器内写 `/app/logs/chat.log`（该目录不在卷里，重启即清；需要持久化可追加 `-v demo_logs:/app/logs`）。
+> **停止/清理**：`docker compose down`；连同数据卷一起删加 `-v`。
 
 ## 配置（.env）
 
@@ -222,6 +237,8 @@ cd demo-mcp
 - **语义工具层**：`test_stock_input.py`（代码/日期/复权/期数归一化、硬允许列表）、`test_stock_provider.py`（`StockToolProvider` 语义工具 + 错误约定）。
 - **RAG**：20 个 `test_rag_*.py`（PDF 解析、章节树、表格分块、BM25、向量库、重排、引用、摄取幂等、RelStore 持久化、HTTP 检索器、server 助手、funnel 事件、真实 PDF 端到端、sparse import 守卫、离线评估门禁）。
 - **配置/数据层**：默认值/路径/DB URL；内存 SQLite 的 `ChatMessage` 日志 + `ChatTurn` 恢复 + `ChatTurnData` 往返。
+
+> 一次完整实测（168 passed、RAG 离线/真引擎指标、端到端冒烟）记录见 `docs/TEST_REPORT.md`。
 
 ## 真实端到端冒烟（可选）
 

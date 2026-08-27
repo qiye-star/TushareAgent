@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from demomcp.config.settings import Settings
@@ -198,13 +199,136 @@ class FaissVectorStore(VectorStore):
         return len(self._records)
 
 
-def build_vector_store(config: Settings, dim: int) -> VectorStore:
-    """按配置选后端：rag_use_real 且 faiss 可导入 → Faiss；否则内存。"""
+class MilvusVectorStore(VectorStore):
+    """Milvus‑Lite 向量库（真实后端，落盘）：向量存 Milvus，text/元数据存 SQLite RelStore（search 时 join）。
+
+    用 VARCHAR 主键 `{doc_id}#{chunk_index}`（稳定唯一）；标量字段 doc_id/chunk_index/company/year 供
+    Milvus 过滤表达式做跨公司/财年隔离。构造内惰性 import pymilvus。
+    """
+
+    def __init__(
+        self,
+        *,
+        dim: int,
+        uri: str,
+        collection: str = "rag_chunks",
+        rel: Any | None = None,
+        kind: str = "chunk",
+    ) -> None:
+        from pymilvus import DataType, MilvusClient  # 惰性import（可选依赖）
+
+        self.dim = dim
+        self._collection = collection
+        self._rel = rel
+        self._kind = kind  # "chunk" → RelStore.chunks；"section" → RelStore.sections
+        self._own: dict[str, tuple[str, dict]] = {}  # rel=None 时的兜底
+        base = Path(uri)
+        base.mkdir(parents=True, exist_ok=True)
+        self._client = MilvusClient(uri=str(base / "milvus.db"))
+        self._ensure_schema(DataType)
+        if self._client.has_collection(self._collection):
+            # 跨进程重开时集合处于 released 态，需 load 才能 search
+            self._client.load_collection(self._collection)
+
+    def _ensure_schema(self, DataType) -> None:
+        if self._client.has_collection(self._collection):
+            return
+        schema = self._client.create_schema(auto_id=False, enable_dynamic_field=True)
+        schema.add_field("id", DataType.VARCHAR, is_primary=True, max_length=256)
+        schema.add_field("vector", DataType.FLOAT_VECTOR, dim=self.dim)
+        schema.add_field("doc_id", DataType.VARCHAR, max_length=256)
+        schema.add_field("chunk_index", DataType.INT64)
+        schema.add_field("company", DataType.VARCHAR, max_length=64)
+        schema.add_field("year", DataType.INT64)
+        index_params = self._client.prepare_index_params()
+        index_params.add_index(field_name="vector", index_type="AUTOINDEX", metric_type="IP")
+        self._client.create_collection(self._collection, schema=schema, index_params=index_params)
+
+    def add(self, doc_id: str, chunk_index: int, text: str, embedding: list[float], metadata: dict | None = None) -> None:
+        meta = metadata or {}
+        pk = f"{doc_id}#{chunk_index}"
+        self._client.insert(
+            self._collection,
+            [
+                {
+                    "id": pk, "vector": list(embedding), "doc_id": doc_id, "chunk_index": int(chunk_index),
+                    "company": meta.get("company", ""), "year": int(meta.get("year", 0)),
+                }
+            ],
+        )
+        if self._rel is not None:
+            if self._kind == "section":
+                self._rel.add_section(doc_id, chunk_index, text, meta)
+            else:
+                self._rel.add_chunk(doc_id, chunk_index, text, meta)
+        else:
+            self._own[pk] = (text, meta)
+
+    def search(
+        self,
+        query: list[float],
+        *,
+        top_k: int = 10,
+        filters: dict | None = None,
+    ) -> list[ScoredChunk]:
+        expr = _milvus_filter(filters)
+        res = self._client.search(
+            self._collection, data=[list(query)], limit=max(top_k, 1), filter=expr,
+            output_fields=["doc_id", "chunk_index"], search_params={"metric_type": "IP"},
+        )
+        out: list[ScoredChunk] = []
+        if not res:
+            return out
+        for hit in res[0]:
+            ent = getattr(hit, "entity", {}) or {}
+            doc_id = ent.get("doc_id")
+            chunk_index = int(ent.get("chunk_index"))
+            text, meta = self._lookup(doc_id, chunk_index)
+            out.append(ScoredChunk(doc_id=doc_id, chunk_index=chunk_index, text=text, score=float(hit.get("distance", 0.0)), metadata=meta))
+        return out
+
+    def _lookup(self, doc_id: str, chunk_index: int) -> tuple[str, dict]:
+        if self._rel is not None:
+            if self._kind == "section":
+                text, meta = self._rel.get_section(doc_id, chunk_index)
+            else:
+                text, meta = self._rel.get_chunk(doc_id, chunk_index)
+            return (text, meta) if text is not None else ("", {})
+        return self._own.get(f"{doc_id}#{chunk_index}", ("", {}))
+
+    def delete_doc(self, doc_id: str) -> None:
+        if self._client.has_collection(self._collection):
+            self._client.delete(self._collection, filter=f'doc_id == "{doc_id}"')
+        if self._rel is not None:
+            self._rel.delete_doc(doc_id)
+        else:
+            for pk in [k for k in self._own if k.startswith(f"{doc_id}#")]:
+                del self._own[pk]
+
+    def count(self) -> int:
+        res = self._client.query(self._collection, output_fields=["count(*)"])
+        return int(res[0]["count(*)"]) if res else 0
+
+
+def _milvus_filter(filters: dict | None) -> str:
+    if not filters:
+        return ""
+    parts: list[str] = []
+    if filters.get("company"):
+        parts.append(f'company == "{filters["company"]}"')
+    if filters.get("year") is not None:
+        parts.append(f"year == {int(filters['year'])}")
+    return " and ".join(parts)
+
+
+def build_vector_store(config: Settings, dim: int, *, rel: Any | None = None, name: str = "rag_chunks") -> VectorStore:
+    """按配置选后端：rag_use_real 且 pymilvus 可导入 → MilvusVectorStore；否则内存（离线/测试）。"""
     if config.rag_use_real and config.rag_vector_store_path:
         try:
-            import faiss  # noqa: F401  # 仅探测可用性
+            import pymilvus  # noqa: F401  # 仅探测可用性
 
-            return FaissVectorStore(dim=dim, index_path=config.rag_vector_store_path)
+            kind = "section" if name == "rag_sections" else "chunk"
+            return MilvusVectorStore(dim=dim, uri=config.rag_vector_store_path, collection=name, rel=rel, kind=kind)
         except ImportError:
             pass
     return InMemoryVectorStore(dim=dim)

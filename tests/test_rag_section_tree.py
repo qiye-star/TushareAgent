@@ -77,6 +77,35 @@ def test_detect_headings_rejects_long_enumeration_paragraph() -> None:
     assert "3.2 研发投入" in got
 
 
+def test_detect_headings_filters_running_header() -> None:
+    """跨多页重复的「页眉/页脚标题」（如报告全称）不是真标题，应被过滤掉，避免污染章节树。"""
+    header = "宁德时代新能源科技股份有限公司2025 年年度报告全文"
+    blocks = [
+        _blk(p, header, 18.0, p) for p in range(1, 7)  # 同一标题出现在 6 个不同页 → running header
+    ]
+    blocks += [
+        _blk(1, "第三节 管理层讨论与分析", 16.0, 10),
+        _blk(1, "3.2 研发投入", 14.0, 11),
+    ]
+    cands = detect_headings(blocks)
+    got = {c.heading for c in cands}
+    assert header not in got
+    assert "第三节 管理层讨论与分析" in got
+    assert "3.2 研发投入" in got
+
+
+def test_detect_headings_rejects_sentence_punctuation() -> None:
+    """含句读（，；。）的正文片段不是标题（如「3.0 Evo」打造，标配…」），避免污染 section_path。"""
+    blocks = [
+        _blk(1, "第三节 管理层讨论与分析", 16.0, 0),
+        _blk(1, "3.0 Evo」打造，标配「天神之眼C」辅助驾驶系统，", 14.0, 1),
+        _blk(1, "3.2 研发投入", 14.0, 2),
+    ]
+    got = {c.heading for c in detect_headings(blocks)}
+    assert "3.2 研发投入" in got
+    assert not any("天神之眼C" in h for h in got)
+
+
 def test_detect_headings_skips_toc_entries_and_marker() -> None:
     """目录条目（点线导引+尾页码）与「目录」标记不得成为标题候选，避免 TOC 污染章节树。"""
     blocks = [

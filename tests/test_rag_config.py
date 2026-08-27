@@ -14,11 +14,11 @@ def test_rag_config_defaults(make_settings) -> None:
     assert s.rag_embedding_api_key == ""
     assert s.rag_rerank_model == "BAAI/bge-reranker-v2-m3"
     assert s.rag_top_k == 5
-    assert s.rag_candidate_k == 30
-    assert s.rag_top_k_sections == 3
+    assert s.rag_candidate_k == 50
+    assert s.rag_top_k_sections == 5
     assert s.rag_score_threshold == 0.3
-    assert s.rag_rerank_threshold == 0.3
-    assert s.rag_rerank_candidates == 24
+    assert s.rag_rerank_threshold == 0.2
+    assert s.rag_rerank_candidates == 30
     assert s.rag_fin_dense_chunk == 400
     assert s.rag_fin_dense_overlap == 80
     assert s.rag_section_max_chars == 8000
@@ -31,6 +31,9 @@ def test_rag_config_defaults(make_settings) -> None:
     assert s.rag_rrf_k == 60
     assert s.rag_bm25_k1 == 1.5
     assert s.rag_bm25_b == 0.75
+    assert s.rag_http_url == ""
+    assert s.rag_http_timeout == 20.0
+    assert s.rag_http_token == ""
 
 
 def test_rag_config_env_override(make_settings, monkeypatch) -> None:

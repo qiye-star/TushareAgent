@@ -106,21 +106,21 @@ class HashingEmbedder:
         return [x / norm for x in vec]
 
 
-_EMBED_BATCH = 64  # 单次嵌入请求的文本条数（真实年报 1200+ chunk，避免一次超大请求）
+_EMBED_BATCH = 32  # 单次嵌入请求的文本条数（平衡 SiliconFlow 限流与往返次数）
 
 
 class ApiEmbedder:
     """OpenAI 兼容 /embeddings 嵌入服务（服务端跑 bge-m3，本地不加载模型）。
 
     dim 由首次响应延迟锁定（只在 build_index 读取 .dim 时发一次请求，测试不受影响）。
-    encode 按 _EMBED_BATCH 分片、按 index 拼接，保证顺序与完整。
+    encode 按 _EMBED_BATCH 分片、按 index 拼接，保证顺序与完整；client 带短超时+重试。
     """
 
     def __init__(self, model: str = "BAAI/bge-m3", *, base_url: str, api_key: str) -> None:
         from openai import OpenAI  # 惰性import；openai 为既有依赖
 
         self.model = model
-        self._client = OpenAI(api_key=api_key, base_url=base_url)
+        self._client = OpenAI(api_key=api_key, base_url=base_url, timeout=30.0, max_retries=2)
         self._dim: int | None = None
 
     @property

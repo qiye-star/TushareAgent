@@ -1,90 +1,20 @@
 <!doctype html>
 <html lang="zh">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<meta name="description" content="Tushare · demo-mcp — AI 金融数据对话助手（仅支持 比亚迪 / 宁德时代）" />
-<title>Tushare · demo-mcp</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📈</text></svg>" />
-<link rel="stylesheet" href="/styles.css" />
-</head>
-<body>
-<!-- 移动端遮罩（点击关闭抽屉） -->
-<div id="mask" class="mask" hidden></div>
-
-<!-- ===== 左侧栏：会话列表 ===== -->
-<aside id="sidebar">
-  <div class="sb-head">
-    <span class="sb-title">会话</span>
-    <button class="btn btn-primary" id="newChat" type="button">＋ 新建</button>
-  </div>
-  <ul id="sessionList" class="session-list">
-    <li class="sb-empty">暂无会话</li>
-  </ul>
-  <div class="sb-foot">
-    <button class="btn btn-ghost" id="closeBtn" type="button">收起侧栏</button>
-  </div>
-</aside>
-
-<!-- ===== 主区 ===== -->
-<main>
-  <!-- 顶栏：会话名 + 状态 + 深度思考开关 + API Key -->
-  <header class="topbar">
-    <button class="icon-btn" id="menuBtn" type="button" aria-label="打开会话列表">☰</button>
-    <div class="title-wrap">
-      <h1 id="sessionTitle">新会话</h1>
-      <span id="status" class="status" data-state="idle">空闲</span>
-    </div>
-
-    <div class="topbar-controls">
-      <!-- 深度思考开关：切 deepseek-reasoner，从而流式显示 reasoning_content -->
-      <label class="switch" title="切到 deepseek-reasoner，可流式显示思考过程。注意：工具调用支持取决于你的 API 版本">
-        <input type="checkbox" id="deepThink" />
-        <span class="sw-track" aria-hidden="true"><span class="sw-thumb"></span></span>
-        <span class="sw-label">深度思考</span>
-      </label>
-
-      <div class="api-key">
-        <label for="apiKey">API Key</label>
-        <div class="key-row">
-          <input id="apiKey" type="password" placeholder="Bearer Token" autocomplete="off" spellcheck="false" />
-          <button class="icon-btn" id="toggleKey" type="button" aria-label="切换显示/隐藏 API Key">👁</button>
-        </div>
-      </div>
-    </div>
-  </header>
-
-  <!-- 消息滚动容器（空态由 app.js 渲染） -->
-  <div id="messages" class="messages"></div>
-
-  <!-- 底部输入 -->
-  <footer class="composer">
-    <div class="quick-chips">
-      <button class="chip-btn" type="button" data-prompt="查询比亚迪日线">查询比亚迪日线</button>
-      <button class="chip-btn" type="button" data-prompt="宁德时代最新报价">宁德时代最新报价</button>
-      <button class="chip-btn" type="button" data-prompt="比亚迪财务数据">比亚迪财务数据</button>
-    </div>
-    <div class="input-row">
-      <textarea id="input" rows="1" placeholder="输入你的问题，Enter 发送，Shift+Enter 换行" autocomplete="off"></textarea>
-      <button id="send" class="btn-send" type="button">发送</button>
-    </div>
-  </footer>
-</main>
-
-<!-- ===== 错误弹窗（网络 / 鉴权401 / 服务错误） ===== -->
-<div id="modal" class="modal-wrap" hidden>
-  <div class="modal">
-    <div class="modal-head">
-      <span id="modalTitle">错误</span>
-      <button class="icon-btn" id="modalClose" type="button" aria-label="关闭">✕</button>
-    </div>
-    <div id="modalBody" class="modal-body"></div>
-  </div>
-</div>
-
-<!-- markdown 库：本地 vendor 优先，缺失时 app.js 注入 CDN，最终退化为转义 -->
-<script src="/vendor/marked.min.js"></script>
-<script src="/vendor/purify.min.js"></script>
-<script src="/app.js"></script>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Tushare · demo-mcp — AI 金融数据对话助手（仅支持 比亚迪 / 宁德时代）"
+    />
+    <title>Tushare · demo-mcp — Agent 工作台</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%233b82f6'/%3E%3Cpath d='M8 22V13M14 22V9M20 22V11M26 22V15' stroke='%23fff' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
 </html>

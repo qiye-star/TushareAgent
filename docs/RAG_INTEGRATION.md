@@ -114,6 +114,7 @@ flowchart TD
 - **块稠密恒参与**（表格块在 chunk store 里，`structural` 也不能丢表格召回）；节稠密 + 节 BM25 仅在 `factual` 时关闭。
 - 聚合键 `(doc_id, section_path)`：不同公司同名章节不合并；保留 `RAG_TOP_K_SECTIONS = 5` 节。
 - 每节候选池：`max(top_k, ceil(rag_rerank_candidates / n_sections))`，去重后硬上限 `RAG_RERANK_CANDIDATES = 30`；无 chunk 的节回退到节级候选。
+- **表格保底**（2026-08-27 新增）：每个命中节若有表格块，至少保留最优 1 块；若池顶 30 将表格全部挤出，则把各节保底表格块回补进池——防止财务数值（表格块在 rerank 分数下常偏低）被池顶/阈值误杀。
 - `ApiReranker`（SiliconFlow `/rerank`，bge-reranker-v2-m3）失败 → **回退 RRF 序且跳过阈值截断**（RRF 分数量级约 1/60，会被 0.2 阈值全灭）；`rerank_degraded` 计数反映退化。
 - 查询向量带 `"{company}{year} "` 前缀与摄入端对齐（向量化包含元数据）；过滤仅在 `rag_strict_scope` 且存在对应维度时应用。
 
@@ -206,7 +207,7 @@ flowchart TD
 | 脚本 | 做什么 | 门禁 |
 |---|---|---|
 | `scripts/eval_rag.py` | 离线评估：默认合成语料（纯 Python，不联网），`--corpus` 对真实 PDF，`--gold/--top-k/--no-real` 可选；指标 context_recall@k / faithfulness / answer_relevance / table_triple_assertion / cross_company_isolation | recall@k ≥ 0.8 ∧ faithfulness ≥ 0.7 ∧ isolation == 1.0（table_triple 仅报告） |
-| `scripts/validate_rag.py` | 真引擎（bge-m3 + bge-reranker）对 docs\ 两份 2025 年报：每公司 recall（真章节首页命中）+ 表格三断言（block=table+正确页+正确节）+ 双向跨公司隔离 | per-company recall ≥ 0.6 ∧ isolation |
+| `scripts/validate_rag.py` | 真引擎（bge-m3 + bge-reranker）对 docs\ 两份 2025 年报：每公司 recall + 表格溯源 + 双向跨公司隔离；金标已按真实分块核校，匹配口径 = **章节锚定 或 页差≤1**（不依赖精确页码） | per-company recall ≥ 0.6 ∧ isolation |
 | `scripts/dba_rag.py` | 离线批量建索引（`--corpus` 默认 RAG_CORPUS_DIR、`--rebuild` 删目录重建、`--hashing` 离线验证模式）；最近一次实测 chunk=2563 / section=443 | — |
 
 测试：**20 个 `test_rag_*.py`**（含 `test_rag_import_guards`（`demomcp.rag` 无 import 守卫）、`test_rag_persist`（RelStore/BM25 往返/has_index）、`test_rag_http_retriever`（MockTransport 请求体与 chunks 还原）、`test_rag_server`（retrieve_from/health_from + web 端点 stub）、`test_rag_funnel`（funnel 阶段计数）、`test_rag_retriever`（RRF 数学/跨公司隔离/策略路由/阈值截断）……）；金标在 `tests/rag_golden/{qa,qa_real}.yaml`。

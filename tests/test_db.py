@@ -81,3 +81,25 @@ async def test_delete_session(store) -> None:
     await store.delete("s1")
     assert await store.get_messages("s1") == []
     assert await store.last_turn_messages("s1") is None
+
+
+async def test_turn_data_roundtrip(store) -> None:
+    await store.append_turn_data(
+        "s1",
+        {"query": "hi", "thinking": "先想", "steps": [{"kind": "tool_call", "data": {"name": "stock_daily"}}]},
+    )
+    await store.append_turn_data("s1", {"query": "next", "thinking": ""})
+    turns = await store.load_turn_data("s1")
+    assert len(turns) == 2
+    assert turns[0]["query"] == "hi"
+    assert turns[0]["thinking"] == "先想"
+    assert turns[0]["steps"][0]["kind"] == "tool_call"
+    assert turns[1]["query"] == "next"
+    assert await store.load_turn_data("none") == []
+
+
+async def test_delete_removes_chat_turn_data(store) -> None:
+    await store.append_turn_data("s1", {"query": "a"})
+    await store.append_turn_data("s1", {"query": "b"})
+    await store.delete("s1")
+    assert await store.load_turn_data("s1") == []

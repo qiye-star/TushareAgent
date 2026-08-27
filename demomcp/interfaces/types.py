@@ -58,3 +58,4 @@ class AgentResult:
     tool_results: list[ToolResult] = field(default_factory=list)
     usage: dict[str, Any] | None = None
     citations: list[str] = field(default_factory=list)
+    structured: dict[str, Any] | None = None

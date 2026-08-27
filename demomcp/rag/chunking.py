@@ -96,7 +96,10 @@ def chunk_blocks(
         out.append(("".join(buf), _rep_block(buf_blocks, None)))
 
     for b in table_blocks:
-        out.append((b.text, b))
+        # 表格块 text 并入题注（heading/table_caption）：dense 检索已带 heading 前缀，
+        # 但重排（reranker）与用户可见 text 只看 b.text（行数据）——并入题注才能命中「表题」类查询并保住财务数值。
+        prefix = " ".join(x for x in (b.heading, b.table_caption) if x)
+        out.append(((prefix + "\n" if prefix else "") + b.text, b))
     return out
 
 

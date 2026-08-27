@@ -25,6 +25,8 @@ dependencies = [
 # 不进入默认 dependencies；用 uv sync --extra rag-full 安装
 [project.optional-dependencies]
 rag-full = [
+    "pymilvus>=2.4",
+    "milvus-lite>=2.4",
     "pymupdf>=1.24",
     "rank-bm25>=0.2.2",
     "jieba>=0.42",

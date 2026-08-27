@@ -116,6 +116,29 @@ class BM25:
         self._total_len -= self._doc_len.pop(section_id, 0)
         self._docs.pop(section_id, None)
 
+    def iter_state(self) -> dict:
+        """导出内部状态（供持久化）：docs/tokens/df/doc_len/total_len/k1/b。"""
+        return {
+            "k1": self._k1, "b": self._b,
+            "docs": [(sid, d.doc_id, d.text, d.metadata) for sid, d in self._docs.items()],
+            "tokens": {sid: dict(tf) for sid, tf in self._tokens.items()},
+            "df": dict(self._df),
+            "doc_len": dict(self._doc_len),
+            "total_len": self._total_len,
+        }
+
+    @classmethod
+    def from_state(cls, state: dict, *, tokenizer: Tokenizer | None = None) -> BM25:
+        """从导出的状态重建（精确还原，不重新分词）。"""
+        b = cls(k1=state["k1"], b=state["b"], tokenizer=tokenizer)
+        b._df = Counter(state["df"])
+        b._doc_len = dict(state["doc_len"])
+        b._total_len = state["total_len"]
+        for sid, doc_id, text, meta in state["docs"]:
+            b._tokens[sid] = Counter(state["tokens"].get(sid, {}))
+            b._docs[sid] = ScoredDoc(section_id=sid, doc_id=doc_id, text=text, score=0.0, metadata=meta)
+        return b
+
 
 def replace_scored(doc: ScoredDoc, score: float) -> ScoredDoc:
     return replace(doc, score=score)

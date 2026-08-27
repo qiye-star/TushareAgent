@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from demomcp.config.settings import Settings
 from demomcp.rag.bm25 import BM25
 from demomcp.rag.captioner import Captioner, build_captioner
@@ -28,6 +30,7 @@ class RagIndex:
         bm25_section: BM25,
         config: Settings,
         captioner: Captioner | None = None,
+        rel: Any | None = None,
     ) -> None:
         self.embedder = embedder
         self.chunk_store = chunk_store
@@ -35,6 +38,7 @@ class RagIndex:
         self.bm25_section = bm25_section
         self.captioner = captioner
         self.config = config
+        self.rel = rel  # SQLite RelStore（Milvus 持久化时），为空则内存索引
 
     def delete_doc(self, doc_id: str) -> None:
         self.chunk_store.delete_doc(doc_id)
@@ -104,15 +108,25 @@ class RagIndex:
 
 
 def build_index(config: Settings) -> RagIndex:
-    """按配置组装 embedder / 两个向量库 / BM25 / captioner。离线默认全纯 Python。"""
+    """按配置组装 embedder / 两个向量库 / BM25 / captioner。离线默认纯 Python；real 时用 Milvus+RelStore。"""
+    from demomcp.rag.persist import RelStore
+
     embedder = build_embedder(config)
-    chunk_store = build_vector_store(config, embedder.dim)
-    section_store = build_vector_store(config, embedder.dim)
+    rel = None
+    if config.rag_use_real and config.rag_vector_store_path:
+        try:
+            import pymilvus  # noqa: F401  # 仅探测
+
+            rel = RelStore(config.rag_vector_store_path)
+        except ImportError:
+            rel = None
+    chunk_store = build_vector_store(config, embedder.dim, rel=rel, name="rag_chunks")
+    section_store = build_vector_store(config, embedder.dim, rel=rel, name="rag_sections")
     bm25 = BM25(k1=config.rag_bm25_k1, b=config.rag_bm25_b)
     captioner = build_captioner(config)
     return RagIndex(
         embedder=embedder, chunk_store=chunk_store, section_store=section_store,
-        bm25_section=bm25, captioner=captioner, config=config,
+        bm25_section=bm25, captioner=captioner, config=config, rel=rel,
     )
 
 

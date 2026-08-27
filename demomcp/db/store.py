@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from demomcp.db.models import Base, ChatMessage, ChatTurn
+from demomcp.db.models import Base, ChatMessage, ChatTurn, ChatTurnData
 
 
 class ChatHistoryStore:
@@ -43,6 +43,23 @@ class ChatHistoryStore:
         async with self._session_factory() as session:
             session.add(ChatTurn(session_id=session_id, messages=json.dumps(messages, ensure_ascii=False)))
             await session.commit()
+
+    async def append_turn_data(self, session_id: str, data: dict[str, Any]) -> None:
+        """每轮 UI 载荷（thinking/steps/structured 等）落库，供前端重载还原。"""
+        async with self._session_factory() as session:
+            session.add(ChatTurnData(session_id=session_id, data=json.dumps(data, ensure_ascii=False)))
+            await session.commit()
+
+    async def load_turn_data(self, session_id: str) -> list[dict[str, Any]]:
+        """按轮序返回该会话每轮的 UI 载荷（升序）。"""
+        async with self._session_factory() as session:
+            stmt = (
+                select(ChatTurnData)
+                .where(ChatTurnData.session_id == session_id)
+                .order_by(ChatTurnData.id)
+            )
+            rows = (await session.execute(stmt)).scalars().all()
+        return [json.loads(r.data) for r in rows]
 
     async def last_turn_messages(self, session_id: str) -> list[dict[str, Any]] | None:
         """取该会话最新一轮的完整消息（累计式），用于恢复；无记录则 None。"""
@@ -112,6 +129,7 @@ class ChatHistoryStore:
         async with self._session_factory() as session:
             await session.execute(delete(ChatMessage).where(ChatMessage.session_id == session_id))
             await session.execute(delete(ChatTurn).where(ChatTurn.session_id == session_id))
+            await session.execute(delete(ChatTurnData).where(ChatTurnData.session_id == session_id))
             await session.commit()
 
     async def dispose(self) -> None:

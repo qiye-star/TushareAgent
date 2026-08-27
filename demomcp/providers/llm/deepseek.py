@@ -50,6 +50,7 @@ class DeepSeekLLMClient:
         system: str | None = None,
         max_tokens: int = 8192,
         stream: bool = True,
+        temperature: float | None = None,
         on_text: OnText | None = None,
         on_thinking: OnThinking | None = None,
     ) -> ChatResponse:
@@ -62,6 +63,8 @@ class DeepSeekLLMClient:
             "max_tokens": max_tokens,
             "tool_choice": "auto",
         }
+        if temperature is not None:
+            kwargs["temperature"] = temperature
         if tools:
             kwargs["tools"] = [to_openai_tool(t) for t in tools]
 

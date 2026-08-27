@@ -6,8 +6,8 @@ from demomcp.graph.state import GraphState
 
 
 def route_after_router(state: GraphState) -> str:
-    """越界 → fallback；否则进入 tool_rag。"""
-    return "fallback" if state.get("out_of_scope") else "tool_rag"
+    """越界 → fallback；否则进入 rewrite_query（改写后再进 tool_rag）。"""
+    return "fallback" if state.get("out_of_scope") else "rewrite_query"
 
 
 def route_after_tool_rag(state: GraphState) -> str:

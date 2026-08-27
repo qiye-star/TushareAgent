@@ -11,11 +11,14 @@ import sys
 import uuid
 
 from demomcp.agents.agent import Agent
+from demomcp.config.logging import configure_logging, get_logger, log_chat_turn
 from demomcp.config.settings import Settings
 from demomcp.db.store import build_store
 from demomcp.providers.llm.deepseek import DeepSeekLLMClient
 from demomcp.providers.tools.mcp import mcp_tool_provider
 from demomcp.providers.tools.stocks import StockToolProvider
+
+logger = get_logger("entry.cli")
 
 
 async def main() -> int:
@@ -35,6 +38,9 @@ async def main() -> int:
 
     try:
         await store.init()
+        configure_logging(
+            settings.log_level, settings.log_file, settings.log_max_bytes, settings.log_backup_count
+        )
         async with mcp_tool_provider(
             settings.tushare_mcp_url, timeout=settings.mcp_timeout, retries=settings.mcp_retries
         ) as tools:
@@ -73,6 +79,25 @@ async def main() -> int:
                     await store.append(session_id, "assistant", result.final_text)
                     for tr in result.tool_results:
                         await store.append(session_id, "tool", tr.content)
+                    log_chat_turn(
+                        logger,
+                        session_id,
+                        {
+                            "query": prompt,
+                            "thinking": "",
+                            "steps": [],
+                            "answer": result.final_text,
+                            "sources": [],
+                            "citations": [],
+                            "claims": [],
+                            "metadata": None,
+                            "intent": None,
+                            "strategy": None,
+                            "stopped_reason": result.stopped_reason,
+                            "usage": None,
+                            "error": None,
+                        },
+                    )
                     history = result.messages
             except (EOFError, KeyboardInterrupt):
                 print()

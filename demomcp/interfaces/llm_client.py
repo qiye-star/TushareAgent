@@ -21,10 +21,14 @@ class LLMClient(Protocol):
         system: str | None = None,
         max_tokens: int,
         stream: bool = True,
+        temperature: float | None = None,
         on_text: OnText | None = None,
         on_thinking: OnThinking | None = None,
     ) -> ChatResponse:
-        """发起一轮对话，返回中立 ChatResponse；stream 时经回调逐步吐出文本 / 思考。"""
+        """发起一轮对话，返回中立 ChatResponse；stream 时经回调逐步吐出文本 / 思考。
+
+        temperature=None 表示不覆盖（用 provider 默认）；设为 0 让相同输入得到一致决策/输出。
+        """
         ...
 
     def assistant_message(self, resp: ChatResponse) -> dict[str, Any]:

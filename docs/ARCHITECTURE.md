@@ -17,6 +17,7 @@
 | `RAG_FINANCE.md` | 设计蓝图 | RAG 动机与评估标准（含「实现状态」核对表） |
 | `tool-call-layer.md` | 设计→已实现 | 语义工具层设计（双票限定、4 工具） |
 | `UPLOAD_GUIDE.md` | 运维手册 | 一键上传云服务器（rclone + SSH 密钥） |
+| `TEST_REPORT.md` | 测试记录 | 2026-08-27 完整测试（3 次 + 量化评分卡 89.4/100）：pytest 169 项、RAG 离线/真引擎指标、E2E |
 
 ## 2. 分层架构
 

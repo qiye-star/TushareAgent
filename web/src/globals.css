@@ -1,0 +1,123 @@
+@import "tailwindcss";
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
+
+/* 开源 Markdown 排版插件（prose 类）：表格/标题/列表/代码块/引用 */
+@plugin "@tailwindcss/typography";
+
+/* Class-based dark mode: `dark:` utilities activate under `.dark` */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: "Geist Variable", ui-sans-serif, system-ui, -apple-system,
+    "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, "SFMono-Regular",
+    "JetBrains Mono", Menlo, monospace;
+
+  /* Soft blue primary — the single accent (Color Consistency Lock) */
+  --color-primary-50: #eff6ff;
+  --color-primary-100: #dbeafe;
+  --color-primary-200: #bfdbfe;
+  --color-primary-300: #93c5fd;
+  --color-primary-400: #60a5fa;
+  --color-primary-500: #3b82f6;
+  --color-primary-600: #2563eb;
+  --color-primary-700: #1d4ed8;
+  --color-primary-800: #1e40af;
+  --color-primary-900: #1e3a8a;
+
+  /* Consistent radius scale */
+  --radius-card: 0.75rem; /* 12px — cards */
+  --radius-control: 0.5rem; /* 8px — buttons/inputs */
+
+  /* Tinted shadows, never pure black */
+  --shadow-soft: 0 1px 2px rgb(15 23 42 / 0.05), 0 1px 3px rgb(15 23 42 / 0.04);
+  --shadow-card: 0 1px 2px rgb(15 23 42 / 0.04),
+    0 8px 24px -12px rgb(37 99 235 / 0.12);
+}
+
+@layer components {
+  /* 答案表格：表头强调 + 列分隔 + 斑马纹 + 行悬停（卡片式圆角/横滚容器在 AnswerBlock 内） */
+  .answer-table {
+    border-collapse: collapse;
+    @apply border border-zinc-200 dark:border-zinc-700;
+  }
+  .answer-table thead th {
+    @apply border-b-2 border-zinc-300 bg-zinc-100 px-4 py-2.5 font-semibold text-zinc-700 dark:border-zinc-600 dark:bg-zinc-800/70 dark:text-zinc-200;
+  }
+  .answer-table thead th:not(:first-child) {
+    @apply border-l border-zinc-200 dark:border-zinc-700;
+  }
+  .answer-table tbody td {
+    @apply border-b border-zinc-200 px-4 py-2.5 align-middle text-left dark:border-zinc-700;
+  }
+  /* 首列（指标/字段名）自动加粗，让关键标签醒目，不依赖 LLM 输出 ** */
+  .answer-table tbody td:first-child {
+    @apply font-semibold text-zinc-800 dark:text-zinc-100;
+  }
+  /* 竖网格线：让表格边框更清晰（加粗） */
+  .answer-table tbody td:not(:first-child) {
+    @apply border-l border-zinc-200/80 dark:border-zinc-700/60;
+  }
+  .answer-table tbody tr:nth-child(even) td {
+    @apply bg-zinc-50/60 dark:bg-zinc-900/40;
+  }
+  .answer-table tbody tr:hover td {
+    @apply bg-zinc-100/70 dark:bg-zinc-800/40;
+  }
+  /* 关键数字/日期加粗强调（提示词要求 **...** → strong） */
+  .prose strong {
+    @apply font-semibold;
+  }
+}
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+  .dark {
+    color-scheme: dark;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+  }
+
+  /* Thin styled scrollbars that fit the palette */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(161 161 170 / 0.4) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background-color: rgb(161 161 170 / 0.4);
+    border-radius: 9999px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+/* 思考过程：RAG 漏斗管线级联渐显（repo 首个 @keyframes） */
+@keyframes funnel-rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.funnel-stage {
+  animation: funnel-rise 0.35s ease both;
+}

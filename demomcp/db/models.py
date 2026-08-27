@@ -34,3 +34,17 @@ class ChatTurn(Base):
     session_id: Mapped[str] = mapped_column(String(64), index=True)
     messages: Mapped[str] = mapped_column(Text)  # json.dumps(list[dict])
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class ChatTurnData(Base):
+    """每轮面向 UI 的完整载荷（JSON），供前端重载时原样还原思考/工具调用/ReAct 链/引用。
+
+    与 ChatTurn（供 LLM 上下文恢复的 OpenAI 消息）解耦；create_all 会新建本表，不触发 ALTER。
+    """
+
+    __tablename__ = "chat_turn_data"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    data: Mapped[str] = mapped_column(Text)  # json.dumps(dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

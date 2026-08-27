@@ -1,0 +1,23 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+dist/
+demo.db
+*.db
+
+# Node — 前端源码的依赖与产物在容器内重新生成
+web/node_modules/
+web/dist/
+web/.vite/
+
+# 其它
+.git/
+.gitignore
+.env
+venv/
+node_modules/
+*.log
+docs/

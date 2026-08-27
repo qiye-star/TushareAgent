@@ -1,9 +1,17 @@
-"""轻依赖守卫：import demomcp.rag 及其子模块绝不加载 pymupdf/faiss/sentence_transformers/torch。"""
+"""轻依赖守卫：import demomcp.rag 及其子模块绝不加载 pymupdf/faiss/sentence_transformers/torch。
+
+用**子进程**执行，避免本进程其它测试（如 MilvusVectorStore 测试会 import pymilvus，连带把 `faiss`
+放进 sys.modules）污染判断。
+"""
 
 from __future__ import annotations
 
-import importlib
+import os
+import subprocess
 import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
 
 RAG_SUBMODULES = [
     "demomcp.rag",
@@ -22,6 +30,7 @@ RAG_SUBMODULES = [
     "demomcp.rag.reranker",
     "demomcp.rag.query_build",
     "demomcp.rag.citing",
+    "demomcp.rag.persist",
     "demomcp.rag.fakes",
 ]
 
@@ -29,7 +38,8 @@ HEAVY = ("pymupdf", "fitz", "faiss", "sentence_transformers", "torch")
 
 
 def test_rag_import_does_not_load_heavy_deps() -> None:
-    for name in RAG_SUBMODULES:
-        importlib.import_module(name)
-    for heavy in HEAVY:
-        assert heavy not in sys.modules, f"import demomcp.rag 不应加载 {heavy}"
+    imports = "\n".join(f"importlib.import_module({name!r})" for name in RAG_SUBMODULES)
+    checks = "\n".join(f"assert {h!r} not in sys.modules, {h!r}" for h in HEAVY)
+    script = f"import importlib, sys\n{imports}\n{checks}"
+    env = dict(os.environ, PYTHONPATH=str(ROOT))
+    subprocess.run([sys.executable, "-c", script], check=True, env=env, cwd=str(ROOT))

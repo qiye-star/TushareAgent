@@ -21,10 +21,13 @@ class MockLLM:
         system: str | None = None,
         max_tokens: int = 8192,
         stream: bool = True,
+        temperature: float | None = None,
         on_text: OnText | None = None,
         on_thinking: OnThinking | None = None,
     ) -> ChatResponse:
-        self.calls.append({"messages": messages, "tools": tools, "system": system})
+        self.calls.append(
+            {"messages": messages, "tools": tools, "system": system, "temperature": temperature}
+        )
         resp = self._responses.pop(0)
         if on_text and resp.text:
             await on_text(resp.text)

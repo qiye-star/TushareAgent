@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     # 会话历史库（留空 → 回落 sqlite+aiosqlite:///<PROJECT_ROOT>/demo.db）
     demo_database_url: str = ""             # DEMO_DATABASE_URL
 
+    # 日志：对话以文本文件记录（UTF-8 + 按大小轮转）
+    log_level: str = Field(default="INFO", alias="LOG_LEVEL")            # DEBUG / INFO / ...
+    log_file: str = Field(default=str(PROJECT_ROOT / "logs" / "chat.log"), alias="CHAT_LOG_PATH")
+    log_max_bytes: int = Field(default=5 * 1024 * 1024, alias="LOG_MAX_BYTES")  # 单文件上限，触发轮转
+    log_backup_count: int = Field(default=3, alias="LOG_BACKUP_COUNT")   # 轮转保留份数
+
     # MCP：经 TUSHARE_MCP_URL 连接 Tushare 官方 MCP（token 放 URL query，由 .env 提供完整地址）；
     # 内置 mcp_server/（本地代理→每接口工具）默认停用，仅作后备。
     tushare_mcp_url: str = "https://api.tushare.pro/mcp/"  # TUSHARE_MCP_URL（.env 提供 https://api.tushare.pro/mcp/?token=...）
@@ -61,7 +67,7 @@ class Settings(BaseSettings):
     rag_use_real: bool = Field(default=False, alias="RAG_USE_REAL")                 # 是否走真实后端（bge-m3/faiss/pymupdf）
     rag_vector_store_path: str = Field(
         default=str(PROJECT_ROOT / "data" / "vectorstore"), alias="RAG_VECTOR_STORE_PATH"
-    )
+    )  # RAG 持久化目录：Milvus‑Lite 向量库 + SQLite 关系库（rag_rel.db）落盘于此
     rag_embedding_model: str = Field(default="BAAI/bge-m3", alias="RAG_EMBEDDING_MODEL")  # 默认真实向量模型；"hashing"=测试兜底
     rag_embedding_api_base: str = Field(default="https://api.siliconflow.cn/v1", alias="RAG_EMBEDDING_API_BASE")  # OpenAI 兼容嵌入服务 base_url（SiliconFlow 默认）
     rag_embedding_api_key: str = Field(default="", alias="RAG_EMBEDDING_API_KEY")    # 嵌入服务 api_key；为空则回退 hashing
@@ -69,11 +75,11 @@ class Settings(BaseSettings):
     rag_captioner: str = Field(default="deepseek-v4-flash-vision-exp", alias="RAG_CAPTIONER")  # 多模态模型名；无 DS_API_KEY 回退 Noop
     rag_rerank_model: str = Field(default="BAAI/bge-reranker-v2-m3", alias="RAG_RERANK_MODEL")  # 重排模型（SiliconFlow 服务端）；无 key 回退 Noop
     rag_top_k: int = Field(default=5, alias="RAG_TOP_K")
-    rag_candidate_k: int = Field(default=30, alias="RAG_CANDIDATE_K")
-    rag_top_k_sections: int = Field(default=3, alias="RAG_TOP_K_SECTIONS")
+    rag_candidate_k: int = Field(default=50, alias="RAG_CANDIDATE_K")  # 三路检索召回（recall-first）
+    rag_top_k_sections: int = Field(default=5, alias="RAG_TOP_K_SECTIONS")  # 候选节数（recall-first，避免答案落在第 4+ 节被截）
     rag_score_threshold: float = Field(default=0.3, alias="RAG_SCORE_THRESHOLD")
-    rag_rerank_threshold: float = Field(default=0.3, alias="RAG_RERANK_THRESHOLD")  # bge-reranker-v2-m3 对真实 MD&A 文本分偏低，0.5 过严
-    rag_rerank_candidates: int = Field(default=24, alias="RAG_RERANK_CANDIDATES")  # 重排候选池容量（每 top 节 per_section 个）
+    rag_rerank_threshold: float = Field(default=0.2, alias="RAG_RERANK_THRESHOLD")  # bge-reranker-v2-m3 对真实 MD&A 文本分偏低，0.2 提召回
+    rag_rerank_candidates: int = Field(default=30, alias="RAG_RERANK_CANDIDATES")  # 重排候选池上限（recall-first 放宽；实际由 per_section 驱动）
     rag_fin_dense_chunk: int = Field(default=400, alias="RAG_FIN_DENSE_CHUNK")
     rag_fin_dense_overlap: int = Field(default=80, alias="RAG_FIN_DENSE_OVERLAP")
     rag_section_max_chars: int = Field(default=8000, alias="RAG_SECTION_MAX_CHARS")
@@ -86,6 +92,10 @@ class Settings(BaseSettings):
     rag_rrf_k: int = Field(default=60, alias="RAG_RRF_K")
     rag_bm25_k1: float = Field(default=1.5, alias="RAG_BM25_K1")
     rag_bm25_b: float = Field(default=0.75, alias="RAG_BM25_B")
+    rag_corpus_dir: str = Field(default="", alias="RAG_CORPUS_DIR")  # 可选年报 PDF 目录；启动时 ingest 建索引；空则检索为空
+    rag_http_url: str = Field(default="", alias="RAG_HTTP_URL")     # 非空 → agent 经 HTTP 检索（web /api/rag/retrieve），不再本地打开 Milvus
+    rag_http_timeout: float = Field(default=20.0, alias="RAG_HTTP_TIMEOUT")  # HTTP 检索超时（秒）
+    rag_http_token: str = Field(default="", alias="RAG_HTTP_TOKEN")  # 可选 Bearer token（内部服务鉴权）
 
     @property
     def is_configured(self) -> bool:

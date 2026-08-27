@@ -6,9 +6,13 @@ __pycache__/
 *.db
 .env
 .venv/
+*.log
 
 # web 构建产物 / 依赖（前端已迁到 node_modules；vendored 改为本地不提交、由 CDN 兜底）
 web/node_modules/
 web/dist/
 web/.vite/
 web/vendor/
+
+# 对话文本日志（logs/chat.log 等，UTF-8 + 轮转）
+logs/

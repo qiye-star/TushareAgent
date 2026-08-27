@@ -24,13 +24,17 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from demomcp.agents.agent import Agent
+from demomcp.config.logging import configure_logging, get_logger, log_chat_turn
 from demomcp.config.settings import Settings
 from demomcp.db.store import ChatHistoryStore, build_store
 from demomcp.providers.llm.deepseek import DeepSeekLLMClient
 from demomcp.providers.tools.mcp import mcp_tool_provider
 from demomcp.providers.tools.stocks import StockToolProvider
+from demomcp.rag.schemas import RetrievalPlan
 
-WEB_DIR = Path(__file__).resolve().parents[2] / "web"
+# React 前端构建产物输出到 web/dist（见 web/vite.config.ts 的 build.outDir）。
+# 开发时用 `cd web && npm run dev`（Vite 代理到本服务）；生产由本静态挂载同源服务 dist。
+WEB_DIR = Path(__file__).resolve().parents[2] / "web" / "dist"
 
 
 @asynccontextmanager
@@ -38,6 +42,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = Settings()
     store = build_store(settings.effective_database_url)
     await store.init()
+    configure_logging(
+        settings.log_level, Path(settings.log_file), settings.log_max_bytes, settings.log_backup_count
+    )
     app.state.settings = settings
     app.state.store = store
     try:
@@ -47,6 +54,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Tushare demo-mcp", lifespan=lifespan)
+logger = get_logger("entry.web")
 
 
 class ChatRequest(BaseModel):
@@ -69,6 +77,9 @@ async def chat(req: ChatRequest) -> StreamingResponse:
 
     queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
 
+    # 本轮累积：service 端在同一回调里收集，供落库为 ChatTurnData（前端重载原样还原）。
+    turn: dict[str, Any] = {"thinking": "", "steps": []}
+
     async def emit(kind: str, data: dict[str, Any]) -> None:
         await queue.put((kind, data))
 
@@ -76,12 +87,21 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         await emit("text", {"text": text})
 
     async def on_thinking(text: str) -> None:
+        turn["thinking"] += text
         await emit("thinking", {"text": text})
 
     async def on_tool(name: str, arguments: dict[str, Any], result: Any) -> None:
+        turn["steps"].append({"kind": "tool_call", "data": {"name": name, "input": arguments}})
+        turn["steps"].append(
+            {"kind": "tool_result", "data": {"name": name, "content": result.content, "ok": not result.is_error}}
+        )
         await emit("tool_call", {"name": name, "input": arguments})
         await emit("tool_result", {"name": name, "content": result.content, "ok": not result.is_error})
         await store.append(session_id, "tool", result.content, is_error=result.is_error)
+
+    async def on_process(kind: str, data: dict[str, Any]) -> None:
+        turn["steps"].append({"kind": kind, "data": data})
+        await emit("process", {"kind": kind, **data})
 
     async def _run_agent() -> None:
         llm = DeepSeekLLMClient(
@@ -102,19 +122,56 @@ async def chat(req: ChatRequest) -> StreamingResponse:
                     on_text=on_text,
                     on_thinking=on_thinking,
                     on_tool=on_tool,
+                    on_process=on_process,
                 )
             await store.append(session_id, "assistant", result.final_text)
             await store.append_turn(session_id, result.messages)
+            structured = result.structured or {}
+            blob = {
+                "query": req.message,
+                "thinking": turn["thinking"],
+                "steps": turn["steps"],
+                "answer": result.final_text,
+                "sources": structured.get("sources", []),
+                "citations": structured.get("citations", []),
+                "claims": structured.get("claims", []),
+                "metadata": structured.get("metadata"),
+                "intent": structured.get("intent"),
+                "strategy": structured.get("strategy"),
+                "stopped_reason": result.stopped_reason,
+                "usage": result.usage,
+                "error": None,
+            }
+            await store.append_turn_data(session_id, blob)
+            log_chat_turn(logger, session_id, blob)
             await emit(
                 "done",
                 {
                     "stopped_reason": result.stopped_reason,
                     "session_id": session_id,
                     "usage": result.usage,
+                    "structured": result.structured,
                 },
             )
         except Exception as exc:  # noqa: BLE001 - 单轮错误以 SSE error 事件下发并落库定位
             await store.append(session_id, "error", f"{type(exc).__name__}: {exc}")
+            blob = {
+                "query": req.message,
+                "thinking": turn["thinking"],
+                "steps": turn["steps"],
+                "answer": "",
+                "sources": [],
+                "citations": [],
+                "claims": [],
+                "metadata": None,
+                "intent": None,
+                "strategy": None,
+                "stopped_reason": "error",
+                "usage": None,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            await store.append_turn_data(session_id, blob)
+            log_chat_turn(logger, session_id, blob)
             await emit("error", {"message": f"{type(exc).__name__}: {exc}"})
         finally:
             await emit("__end__", {})
@@ -146,10 +203,47 @@ async def get_session(session_id: str) -> list[dict[str, Any]]:
     return messages
 
 
+@app.get("/api/sessions/{session_id}/turns")
+async def get_session_turns(session_id: str) -> list[dict[str, Any]]:
+    """每轮面向 UI 的完整载荷（thinking/steps/structured），供前端重载还原；无数据返回 []。"""
+    return await app.state.store.load_turn_data(session_id)
+
+
 @app.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: str) -> dict[str, bool]:
     await app.state.store.delete(session_id)
     return {"deleted": True}
+
+
+@app.post("/api/rag/retrieve")
+async def rag_retrieve(req: RetrievalPlan) -> dict[str, Any]:
+    """RAG 检索端点：供其它进程（CLI/脚本/2nd worker）经 HTTP 取数，不各自打开 Milvus（单进程独占锁）。
+
+    Milvus 由本 web 进程持有；取不到索引（他进程持锁/未建）→ 显式 degraded，不抛 500。
+    """
+    from demomcp.rag.runtime import build_runtime_retriever
+    from demomcp.rag.server import retrieve_from
+
+    retriever: Any = None
+    try:
+        retriever = await build_runtime_retriever(app.state.settings)
+    except Exception:  # noqa: BLE001 - 索引不可开 → 降级返回
+        retriever = None
+    return await retrieve_from(retriever, req)
+
+
+@app.get("/api/rag/health")
+async def rag_health() -> dict[str, Any]:
+    """检索健康度：索引是否可开、chunk 总数（供前端/运维观察）。"""
+    from demomcp.rag.runtime import build_runtime_retriever
+    from demomcp.rag.server import health_from
+
+    retriever: Any = None
+    try:
+        retriever = await build_runtime_retriever(app.state.settings)
+    except Exception:  # noqa: BLE001 - 索引不可开 → 视为不可用
+        retriever = None
+    return health_from(retriever)
 
 
 def _mount_static() -> None:

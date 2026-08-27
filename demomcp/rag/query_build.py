@@ -2,9 +2,31 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
-from demomcp.rag.schemas import RetrievalPlan
+from demomcp.rag.schemas import RagFilters, RetrievalPlan
+
+# 已知语料公司（名称/代码/别名 → 标准公司名），用于从查询推断 filters（跨公司隔离）。
+_COMPANY_ALIASES: list[tuple[tuple[str, ...], str]] = [
+    (("比亚迪", "002594", "byd", "002594.sz"), "比亚迪"),
+    (("宁德时代", "宁德", "300750", "catl", "300750.sz"), "宁德时代"),
+]
+
+
+def infer_filters(query: str) -> RagFilters:
+    """从查询匹配公司/年份 → RagFilters（命中才填；供 RAG_STRICT_SCOPE 做跨公司/财年隔离）。"""
+    q = (query or "").lower()
+    company = None
+    for keys, company_name in _COMPANY_ALIASES:
+        if any(k in q for k in keys):
+            company = company_name
+            break
+    year = None
+    m = re.search(r"(?<!\d)(?:19|20)\d{2}(?!\d)", query or "")
+    if m:
+        year = int(m.group(0))
+    return RagFilters(company=company, year=year)
 
 FIN_TERMS: list[str] = [
     "净利率", "毛利率", "研发费用率", "研发投入", "扣非", "归母净利润", "营业收入",
