@@ -595,3 +595,21 @@ async def test_rewrite_query_llm_semantic() -> None:
 
     out2 = await make_rewrite_query(_Boom())({"original_query": "比亚迪去年研发花多少", "out_of_scope": False}, {})
     assert out2["rewritten_query"]  # 兜底到确定性改写，仍非空
+
+
+def test_rewrite_query_domain_expansion() -> None:
+    """口语→年报措辞：海外/乘用车/拓展规划 应补出 汽车/整车/出海/全球化布局 等报告术语。"""
+    from demomcp.graph.nodes import _deterministic_rewrite
+
+    rq = _deterministic_rewrite("比亚迪2025年海外乘用车业务拓展规划")
+    assert "比亚迪" in rq and "2025" in rq
+    for term in ("汽车", "新能源汽车", "整车", "海外市场", "全球化布局", "出海"):
+        assert term in rq, f"缺 {term}: {rq}"
+
+
+def test_fin_terms_cover_domain_vocab() -> None:
+    """FIN_TERMS 扩展后：海外/乘用车/产销量 进入 concepts（供 BM25 关键词扩展）。"""
+    from demomcp.rag.query_build import extract_concepts
+
+    concepts = extract_concepts("海外乘用车出口产销量")
+    assert "海外" in concepts and "乘用车" in concepts and "产销量" in concepts

@@ -153,13 +153,41 @@ def make_router(llm: Any, *, max_tokens: int):
     return router
 
 
+# 口语/泛指 → 年报措辞（rewrite_query 兜底与 LLM 提示共用）：缩小用户与年报的词汇差。
+# 例：「海外乘用车业务拓展规划」→ 展开成「海外市场/全球化布局/出海/汽车/新能源汽车/整车/战略」等年报用语。
+_TERM_ALIASES: dict[str, tuple[str, ...]] = {
+    "乘用车": ("汽车", "新能源汽车", "整车"),
+    "新能源": ("新能源汽车", "整车"),
+    "拓展": ("布局", "海外市场", "出海"),
+    "扩展": ("布局", "海外市场", "出海"),
+    "规划": ("战略", "展望", "布局"),
+    "布局": ("全球化布局", "海外市场", "出海"),
+    "海外": ("海外市场", "全球化布局", "出海", "出口"),
+    "出海": ("海外市场", "全球化布局", "出口"),
+    "全球化": ("海外产能", "海外市场", "出海"),
+    "产销量": ("产量", "销量", "产能"),
+}
+
+
+def _domain_expand(q: str) -> list[str]:
+    """把命中触发词的口语，展开成年报措辞（供检索子句与 BM25 命中相关章节）。"""
+    out: list[str] = []
+    for trigger, terms in _TERM_ALIASES.items():
+        if trigger in q:
+            for t in terms:
+                if t not in out:
+                    out.append(t)
+    return out
+
+
 def _deterministic_rewrite(q: str) -> str:
-    """确定性改写兜底：原句 + 公司 + 年份 + 财务术语（子串感知去重）；异常回退原句。"""
+    """确定性改写兜底：原句 + 公司 + 年份 + 财务术语 + 口语→年报措辞（子串感知去重）；异常回退原句。"""
     try:
         f = infer_filters(q)
         kws = expand_keywords(q) or []
+        domain = _domain_expand(q)
         parts = [q] if q else []
-        for x in (f.company, str(f.year) if f.year else "", *kws):
+        for x in (f.company, str(f.year) if f.year else "", *kws, *domain):
             # 追加仅当整词/子串都未出现在原句与已收片段（避免「研发投入情况」再叠「研发投入」）
             if x and x not in parts and (not q or x not in q) and not any(x in p for p in parts):
                 parts.append(x)
