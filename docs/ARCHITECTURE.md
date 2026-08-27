@@ -1,556 +1,336 @@
-# 总体架构文档：基于 LangGraph 的四节点状态机
+# 系统架构（当前实现）：LangGraph 五节点状态机的 LLM+MCP 双票数据助手
 
-> 本文档描述 `demo-mcp`（`D:\TushareAgent`）的**目标架构**：在现有「LLM + MCP 数据对话助手」之上，把编排从手动 agentic loop 升级为 **LangGraph** 状态图，引入 **RAG 检索** 与 **结构化输出**，形成一条「**用户输入 → 意图识别与路由（Router）→ 工具执行与检索（Tool/RAG，并行）→ 投研生成与格式化（Synthesizer，引用 + 免责声明）→ 异常/兜底（Fallback）**」的四节点流水线。
->
-> 本文为**演进中设计**：`demomcp/graph`（LangGraph 四节点：router / tool_rag / synthesizer / fallback）与 `demomcp/rag` 空实现（`NullRetriever`，无向量库/语料）已落地；**质量自检回环 / verify_reasonableness、真实 RAG（embedder/vector_store/ingest）未接入**。文中标注「**现有**」的构件可在真实代码中找到对应实现；标注「**ADD**」的构件为待落地组件。本文不写实现代码，仅给出设计蓝图。
+> 本文档以**当前代码为准**（核对日期 2026-08-27）。描述 `demo-mcp`（`D:\TushareAgent`）实际的层次结构、LangGraph 状态机、各组件运行语义与部署形态。
+> - RAG 全量细节见 `RAG_INTEGRATION.md`（现状权威）；RAG 的设计动因（为何混合检索、如何保证引用不编造）见 `RAG_FINANCE.md`（设计蓝图）；语义工具层设计见 `tool-call-layer.md`。
+> - 凡标注「**未实现 / 预留 / 遗留**」的构件请以第 14 节的如实清单为准，不要据此推断代码行为。
 
----
+## 1. 概述与文档地图
 
-## 1. 概述与目标
+`demo-mcp` 是一个独立运行的 LLM + MCP 数据对话助手：用户用自然语言提问，内置智能体（LangGraph 状态图）自行决定调用哪个工具、经 MCP client 以 streamable-http 连接 **Tushare 官方 MCP**（`TUSHARE_MCP_URL`，token 放 URL query），取数后**并行**检索 RAG 财报知识库，再把「工具证据 + RAG 证据」综合成带确定性引用的中文回答。支持 CLI 与 SSE Web 两个入口，SQLAlchemy 持久化会话历史与每轮 UI 数据。内置 `mcp_server/`（本地代理→每接口工具）默认停用、仅作后备。
 
-### 1.1 项目定位
+本仓库 docs\ 文档矩阵（README.md 的「文档」节为门面，此处是权威描述）：
 
-`demo-mcp` 是一个独立运行的数据对话助手：用户用自然语言提问，内置智能体决定调用哪个 MCP 工具、经 MCP client 以 HTTP(streamable-http) 连接 **Tushare 官方 MCP**（`settings.tushare_mcp_url`，默认 `TUSHARE_MCP_URL`，如 `https://api.tushare.pro/mcp/?token=...`），由 MCP 取数（工具运行时自动发现），再总结成中文回答。当前提供 CLI 与 SSE Web 两个入口，并用 SQLAlchemy 持久化会话历史。
-
-现有分层严格、依赖单向：
-
-```
-interfaces  类型 + ToolProvider / LLMClient 两协议（纯契约，无实现）
-agents      Agent 手动 agentic loop + 工具注册（只依赖 interfaces）
-providers   tools: mcp/fake；llm: deepseek/mock —— 可插拔适配器
-config      Settings + PROJECT_ROOT（含 tushare_mcp_url 等 MCP 连接配置、RAG/图/免责声明配置）
-db          SQLAlchemy 2.0 异步：ChatMessage（可读日志）+ ChatTurn（精确恢复）
-entry       cli.py / web.py（SSE 流式 + /api/sessions）
-mcp_server  内置数据 MCP server（默认停用，仅后备；本地/离线代理用）
-```
-
-### 1.2 为什么转向 LangGraph
-
-手动循环（`demomcp/agents/agent.py` 的 `Agent.run`）在「调用 LLM → 执行工具 → 回填消息」之间线性往复，天然适合单 agent、顺序工具链的场景。但当我们需要：
-
-- **意图分流**：先识别用户意图（纯行情/指标、财报细节、综合对比），再决定走哪套取数与检索策略；
-- **并行两路取数**（工具调用 + RAG 检索同时进行）而不是顺序串行；
-- **多源汇聚与冲突检测**，并在生成前做一次**质量自检**；
-- **受控兜底**：工具超时、无匹配证据、超出标的范围时，走独立的 Fallback 分支而不是硬失败；
-- 在每一步结束后可**持久化检查点**、可**观测**、可**精确恢复**；
-
-线性 `for` 循环就难以优雅表达。LangGraph 的 **`StateGraph`** 将流程建模为显式状态图：节点（nodes）各司其职、条件边（conditional edges）决定分支/回环/终止、`State` 在节点间流转、`checkpointer` 支持可恢复性。它把这些控制流「数据化」，便于并行与进化。
-
-### 1.3 目标能力
-
-| 能力 | 说明 |
-|---|---|
-| 意图路由 | 识别「纯查行情/指标 / 财报细节检索 / 综合对比分析」三类意图，分别路由到相应的取数与检索策略 |
-| 多源佐证 | 同一结论同时由「结构化数据工具」与「非结构化知识文档」支撑 |
-| 可溯源 | 每条声明（Claim）关联具体证据与引用（工具来源 / 文档块 ID） |
-| 结构化输出 | 最终返回带置信度、引用、可靠性标记、**免责声明**的结构化答案 |
-| 受控兜底 | 工具超时 / 无匹配证据 / 超出标的范围时，走 Fallback 输出受控响应，不崩图、不编造 |
-
----
-
-## 2. 现状 vs 目标
-
-下表把现有手动 loop 的每个构件映射到 LangGraph 四节点（详细复用见第 12 节）。
-
-| 现有实现（manual loop） | LangGraph 等价物 | 位置（现有） |
+| 文档 | 状态 | 一句话 |
 |---|---|---|
-| `Agent.run` 的 `for _ in range(max_iterations)` | `StateGraph` 循环边 + `RecursionLimit` / 次数守卫 | `agents/agent.py:44` |
-| `llm.chat(messages, tools, system, …)` | **Router / Synthesizer 的 LLM 调用节点**（`model.bind_tools` + `invoke`） | `agents/agent.py:45-53` |
-| `assistant_message(resp)` 无条件追进 history | `State["messages"]` 用 `add_messages` reducer 追加 | `agents/agent.py:59` |
-| `stop_reason in {end_turn, max_tokens, refusal}` → 返回 | 条件边路由到 **`END`**（终止节点） | `agents/agent.py:61-66` |
-| `not resp.tool_uses` → `no_progress` 返回 | 条件边：无工具调用且非终止 → 终止（`no_progress`） | `agents/agent.py:67-68` |
-| `for tu in resp.tool_uses: _safe_call_tool(...)` | **Tool/RAG 节点**（LangGraph 支持并行工具执行 + RAG 检索） | `agents/agent.py:70-77` |
-| `tool_results_messages(pairs)` 回填 | `add_messages` 追加 `ToolMessage`（`role=tool`，`tool_call_id`） | `agents/agent.py:76` |
-| `_safe_call_tool` 吞异常转 `is_error` | 工具节点内 try/except → 错误 `ToolMessage`，不崩图；超时/无证据走 Fallback | `agents/agent.py:86-90` |
-| `text_parts` 累积 → `final_text` | `State["structured_output"]` 由消息内容 reduce 拼接 | `agents/agent.py:40,56,100` |
-| `results` / `usage` 累积 | `State["tool_evidences"]`、`State["usage"]` | `agents/agent.py:41,54,77` |
-| `CompositeToolProvider`（registry） | `ToolNode` / `StructuredTool` 工具集，按名分发 | `agents/registry.py` |
-| `on_text` / `on_thinking` 流式回调 | `StreamMode="messages"` / `astream_events` 逐 token 流式 | `interfaces/llm_client.py` |
-| `on_tool` 回调（思考轨迹） | Tool/RAG 节点结果 introspection / 回调 / `checkpointer` | `agents/agent.py:74-75` |
-| `AgentResult.messages` 由调用方落库 | `checkpointer`（`InMemorySaver` / `SqliteSaver`）保存整段 state | `cli.py:84` `web.py:111` |
+| `ARCHITECTURE.md`（本文） | 当前实现 | 系统架构：五节点状态机、层次、运行语义、部署 |
+| `RAG_INTEGRATION.md` | 当前实现 | RAG 集成与运行：检索计划、RRF、持久化、HTTP 服务、全量配置表 |
+| `RAG_FINANCE.md` | 设计蓝图 | RAG 动机与评估标准（含「实现状态」核对表） |
+| `tool-call-layer.md` | 设计→已实现 | 语义工具层设计（双票限定、4 工具） |
+| `UPLOAD_GUIDE.md` | 运维手册 | 一键上传云服务器（rclone + SSH 密钥） |
 
-**迁移时需特意保留两点语义：**
+## 2. 分层架构
 
-1. **`end_turn` 与 `no_progress` 是可区分的两条终止路由** —— `no_progress`（`stop_reason` 非终止且无工具调用）需要独立的条件边，不能简化为「无工具调用 → END」。
-2. **错误永不崩图** —— LangGraph 没有 `is_error` 字段，必须把 `_safe_call_tool` / provider 层吞异常的模式搬进每个工具节点：内部 try/except，退出时返回错误 `ToolMessage`（内容含 `Error calling …`）；当**超时 / 无匹配证据 / 超范围**时走 Fallback 分支，而不是抛异常让整图中断。
-
----
-
-## 3. 总体架构图（分层）
-
-在原分层层上**新增**两层：`graph`（LangGraph 编排，四节点）与 `rag`（检索）。其余层复用，不改依赖方向。
-
-```
-entry         cli.py / web.py（SSE 流式 + /api/sessions）
-graph   ▲新建  StateGraph 编排：router / tool_rag / synthesizer / fallback + 条件边 + 检查点
-rag     ▲新建  向量检索：embedder / vector_store / retriever / ingest
-agents        （现有手动 loop 作为可弃用实现保留；工具注册复用 registry）
-interfaces    类型 + ToolProvider / LLMClient 协议（纯契约）
-providers     tools: mcp / fake（复用现有）；llm: deepseek / mock
-config        Settings + PROJECT_ROOT（新增 RAG/图/免责声明配置落点）
-db            ChatMessage + ChatTurn（检查点/结构化输出落库可扩展）
-mcp_server    内置 MCP server（默认停用，仅后备）
-```
+分层严格、依赖单向：`entry → agents → interfaces`；`providers → interfaces`；`config` 为叶子；`db` 被 entry 使用；`rag` 经 `Agent._get_retriever` **注入**到图（不是纯独立模块，见第 10 节）。
 
 ```mermaid
 flowchart TB
-    subgraph Entry["entry 入口层"]
-        CLI["cli.py"] & WEB["web.py（SSE /api/sessions）"]
+    subgraph L1["entry 入口层（启动方式 = 扩展点）"]
+        CLI["cli.py 终端逐轮对话"]
+        WEB["web.py FastAPI + SSE + REST"]
     end
-    subgraph Graph["graph（LangGraph 四节点状态机）"]
-        ROUTER["router\n意图识别与路由"] --> SPLIT{"意图三分\nmarket/report/compare"}
-        SPLIT -->|market| TOOLRAG["tool_rag\n工具执行与检索（并行 fan-out）"]
-        SPLIT -->|report| TOOLRAG
-        SPLIT -->|compare| TOOLRAG
-        TOOLRAG --> SYNTH["synthesizer\n多源整合+质量自检+引用溯源+结构化输出"]
-        TOOLRAG -->|"超时/无证据/权限失败"| FB["fallback\n异常与兜底"]
-        SYNTH -->|"is_reliable / 自检超限"| FB
-        SYNTH --> OUT["END"]
-        FB --> OUT
+    subgraph L2["agents + graph（编排核心）"]
+        AG["Agent 薄壳<br/>构图 + ainvoke + 归一化 AgentResult"]
+        G["LangGraph 五节点<br/>router → rewrite_query<br/>→ tool_rag → synthesizer / fallback"]
     end
-    subgraph Rag["rag（检索）"]
-        TOOLRAG --> EMB["embedder"] --> VS[("vector_store")]
-        VS --> RET["retriever(top-k)"]
+    subgraph L3["interfaces（纯契约，无实现）"]
+        IF["LLMClient / ToolProvider 协议<br/>+ AgentResult / ToolResult / ToolUse 等类型"]
     end
-    subgraph Tools["providers/tools（现有）"]
-        TOOLRAG --> MCP["MCPToolProvider\n(HTTP streamable-http + 重试/超时)"]
-        MCP --> TSMCP["官方 Tushare MCP\n/TUSHARE_MCP_URL/ (token)"]
-        MCP -. 后备 .-> SRV["mcp_server/server.py (默认停用)"]
+    subgraph L4["providers（可插拔适配器）"]
+        LLM["llm: deepseek / mock"]
+        TOOL["tools: mcp（官方 MCP）<br/>stocks（语义工具层）<br/>fake（测试）"]
     end
-    subgraph LLM["providers/llm（现有）"]
-        ROUTER --> DS["DeepSeekLLMClient"]
-        SYNTH --> DS
-        FB --> DS
+    subgraph L5["rag（财报知识库，经注入接入）"]
+        RT["runtime / http_retriever"]
+        HR["hybrid_retriever（三路 RRF + 重排）"]
     end
-    subgraph DB["db（现有）"]
-        SYNTH --> PLAN[("ChatTurn.messages / structured_output 持久化")]
-        FB --> PLAN
+    subgraph L6["支持层"]
+        DB["db: SQLAlchemy 2.0 异步（3 表）"]
+        CFG["config: Settings + PROJECT_ROOT（读 .env）"]
     end
-    Entry --> Graph
+
+    L1 -->|调用| L2
+    L2 -->|定义| L3
+    L3 -.->|协议被实现| L4
+    L2 -->|使用| DB
+    L2 -.->|_get_retriever 注入| RT
+    RT -->|HttpRetriever 模式| WEB
+    RT --> HR
+    L4 -->|streamable-http| MCP["Tushare 官方 MCP<br/>api.tushare.pro/mcp"]
+    MCP -.->|仅后备（默认停用）| BAK["mcp_server/ 内置代理"]
+    L4 -->|OpenAI 兼容| DS["DeepSeek API"]
+    CFG -.->|读 .env 提供默认值| L1
 ```
 
-> 说明：`router` / `synthesizer` / `fallback` 需要 LLM 能力，故指向 `DeepSeekLLMClient`；`tool_rag` 只做工具调用与向量/混合检索（检索不生成），若需对 RAG chunk 重排可再引 LLM（此处从简）。
+各层职责与替代「扩展点」：
 
----
+| 层 | 职责 | 扩展方式 |
+|---|---|---|
+| `entry` | 启动方式（CLI / Web / 批量 / HTTP API） | 加一个入口文件 |
+| `agents` | Agent 薄壳：构图 + ainvoke + 结果归一化 | 改 `agent.py` |
+| `graph` | 五节点状态机：路由 → 改写 → 工具+检索 → 综合/兜底 | 改 `nodes.py` 或加新节点 |
+| `interfaces` | 类型 + 两协议（`LLMClient` / `ToolProvider`） | 改协议即改所有适配器（谨慎） |
+| `providers/tools` | 工具来源（MCP / 语义层 stocks / 假） | 加 `xxx.py` |
+| `providers/llm` | 具体 LLM 后端 | 加 `xxx.py` 实现 `interfaces.llm_client` |
+| `rag` | 财报知识库（解析/检索/引用） | 改 `rag/*`；换检索后端见 `RAG_INTEGRATION.md` §1 |
+| `db` | 会话历史持久化 | 加模型 / 扩展 `store.py` |
+| `config` | 环境变量、路径、透传参数 | 加字段即可 |
 
-## 4. 图拓扑与流程图
+## 3. 运行入口与生命周期
 
-### 4.1 主流程图（用户口径）
+### 3.1 CLI（`demomcp/entry/cli.py`）
+
+`main()`：要求 `settings.ds_api_key`（缺失 exit 2）→ 建 `DeepSeekLLMClient`、`store = build_store(effective_database_url)` + `store.init()` → `async with mcp_tool_provider(...)` 再包 `StockToolProvider` → `Agent(llm, tools=stock_tools, config=settings)`。每轮：`agent.run(prompt, history=history, on_text, on_thinking)` 打印 `[stop: {stopped_reason}]`，逐消息 `store.append(session_id, "user"/"assistant"/"tool", …)`，`history = result.messages`（下轮携带完整 OpenAI 风格消息列表）。`exit/quit/q` 退出。
+
+### 3.2 Web（`demomcp/entry/web.py`，FastAPI `Tushare demo-mcp`）
+
+- `lifespan`：按 `settings.effective_database_url` 建 store + `init()`，存 `app.state`；关停时 dispose（store 跨请求复用）。
+- `POST /chat`（`ChatRequest{message, session_id?, model?}`，`model` 供前端「深度思考」开关传 `deepseek-reasoner`）：返回 SSE `StreamingResponse`。**每请求新建** `DeepSeekLLMClient`（model = 请求或 settings 默认）+ `mcp_tool_provider` + `StockToolProvider` + `Agent`（MCP 会话只存活一轮）。
+  - 恢复：`store.last_turn_messages(session_id)` 拿上一轮完整消息（含 tool_calls/tool_call_id）精确还原上下文。
+  - SSE 事件：`text` / `thinking` / `tool_call{name,input}` / `tool_result{content,ok}` / `process{kind,data}` / `done{stopped_reason,session_id,usage,structured}` / `error`，末尾 `__end__` 哨兵。
+  - 落库三连：`append`（每消息）+ `append_turn`（整轮消息 JSON）+ `append_turn_data`（UI payload：query/thinking/steps/answer/sources/citations/claims/metadata/intent/strategy/stopped_reason/usage/error）。
+- REST：`GET /api/sessions`、`GET /api/sessions/{id}`、`GET /api/sessions/{id}/turns`、`DELETE /api/sessions/{id}`；RAG 端点 `POST /api/rag/retrieve` 与 `GET /api/rag/health`（见 `RAG_INTEGRATION.md` §6）。
+- 静态：若存在 `web/dist` 则 `StaticFiles(html=True)` 挂载前端构建产物。
+
+```mermaid
+sequenceDiagram
+    participant B as 浏览器（React）
+    participant W as web.py POST /chat
+    participant A as Agent.run
+    participant G as 图五节点
+    participant D as DeepSeek（流式）
+    participant S as store（SQLite）
+    B->>W: POST /chat {message, session_id?, model?}
+    W->>S: last_turn_messages（精确恢复上下文）
+    W->>A: run(user_input, history)
+    A->>G: ainvoke(state, config.configurable=回调)
+    G->>D: 各节点 llm.chat(stream=True)
+    D-->>G: text / reasoning_content / tool_calls 逐帧
+    G-->>W: on_text/on_thinking/on_tool/on_process
+    W-->>B: SSE: text·thinking·tool_call·tool_result·process·done·error
+    G->>G: 证据 digest + 引用 + structured 归一化
+    A-->>W: AgentResult
+    W->>S: append + append_turn + append_turn_data
+    W-->>B: 事件 __end__（哨兵）
+```
+
+## 4. LangGraph 图拓扑（五节点）
+
+`build_research_graph(llm, tools, tool_defs, *, max_tokens, disclaimer, base_system="", retriever=None)`（`graph/builder.py`）注册五个节点并连边；**LLM/工具/retriever 在构图时闭包注入**，**运行期回调**（`on_text`/`on_thinking`/`on_tool`/`on_process`）经 `config["configurable"]` 透传（`nodes.py` 内 `_cf` 读取）。
 
 ```mermaid
 flowchart TD
-    A([用户输入]) --> R["Router 意图识别与路由"]
-    R -->|"market 行情/指标"| T1["Tool/RAG 工具调用 + 检索"]
-    R -->|"report 财报细节"| T1
-    R -->|"compare 综合对比"| T1
-    T1 --> S["Synthesizer 整合 + 质量自检 + 引用 + 免责声明"]
-    T1 -->|"超时 / 无证据 / 超范围"| F["Fallback 受控兜底"]
-    S -->|"生成完成"| END([结束])
-    S -->|"自检不通过且超上限"| F
-    F --> END
+    START([START]) --> ROUTER["router<br/>意图分类 + 越界判断<br/>intent ∈ market / report / compare"]
+    ROUTER -->|route_after_router| X1{"out_of_scope?"}
+    X1 -->|是| FB["fallback<br/>确定性文案（无 LLM）"]
+    X1 -->|否| RQ["rewrite_query<br/>RAG 查询改写：公司 + 财年 + 金融术语"]
+    RQ --> TR["tool_rag<br/>LLM 选工具 + 并行执行<br/>RAG 检索 ∥ 工具调用"]
+    TR -->|route_after_tool_rag| X2{"fallback_reason 已设?"}
+    X2 -->|是| FB
+    X2 -->|否| SYN["synthesizer<br/>证据 digest 流式综合<br/>引用 + 免责声明 + structured"]
+    FB --> END([END])
+    SYN --> END
 ```
 
-### 4.2 条件边说明
-
-| 从 → 到 | 条件 | 备注 |
+| 边 | 条件函数 | 分支 |
 |---|---|---|
-| `Router → Tool/RAG` | 恒真；按 `intent` 路由 | `market/report/compare` 三类意图各自的 `retrieval_plan`（工具集 + 检索概念 + 过滤条件）不同 |
-| `Tool/RAG → Tool/RAG` 内 | 并行 fan-out + join | 工具调用与 RAG 检索同时进行，无先后依赖；产出统一进 `evidence` |
-| `Tool/RAG → Synthesizer` | 恒真（有证据） | 两路产出就绪即进入整合 |
-| `Tool/RAG → Fallback` | 工具超时 / 无匹配证据 / 权限类失败 | 无可用证据即可终止（受控兜底），不继续生成 |
-| `Synthesizer → END` | 生成完成 | `is_reliable=true`（或降置信但明确标注） |
-| `Synthesizer → Fallback` | 质量自检不通过且超过重试上限 | 兜底输出 `is_reliable=false` + 免责声明，而非抛出 |
-| `Synthesizer → Synthesizer`（内部自检） | 自检不通过且 `retry_count < SYNTH_MAX_RETRY` | 受控回环：定向修正（换参数/扩时间/降冲突权重），用 `RecursionLimit` 兜底 |
+| START→router | — | 恒走 |
+| router→? | `route_after_router` | `out_of_scope=True` → **fallback**；否则 → **rewrite_query** |
+| rewrite_query→tool_rag | — | 恒走 |
+| tool_rag→? | `route_after_tool_rag` | `state.fallback_reason` 已设 → **fallback**；否则 → **synthesizer** |
+| synthesizer/fallback→END | — | 恒走 |
 
-> **兜底语义**：达到重试上限仍不通过、或根本无证据/超范围时，走 **Fallback** 输出**降置信**结果，在答案中显式标注「需人工核实」/「超出范围 / 无法取到」并附免责声明，而不是给出未经校验的强结论。
+> 图中**没有回环边**：旧版文档中「合成器质量自检 → 重试/回环」的设计**未实现**（见 §14）。当前每条用户消息只走一条单向路径。
 
----
+节点职责一览（`graph/nodes.py`）：
 
-## 5. State 状态设计（LangGraph State）
+| 节点 | 行为要点 | process 事件 |
+|---|---|---|
+| `router` | 非流式 `llm.chat`（温度 0），strict JSON `{intent, out_of_scope}`；intent 只认 `market/report/compare`；LLM 异常 → 默认 `market, False`（自愈） | `intent` |
+| `rewrite_query` | LLM 改写查询（公司+财年+金融术语，温度 0）；`llm=None` 或失败 → 确定性改写 `_deterministic_rewrite`（原文+公司+年份+术语展开去重） | `rewrite` |
+| `tool_rag` | 一次**流式** LLM 选工具；有工具调用则 `asyncio.gather(RAG 检索, *工具调用)` **并行**；结果归一化（见 §8/§10）；双空才 `no_evidence` | `stage/retrieval/funnel/plan/params/validation/aggregate` |
+| `synthesizer` | 只喂 **证据摘要**（`_evidence_digest`，不喂全量消息）；流式生成；成功 → `end_turn` + `structured` | — |
+| `fallback` | 确定性文案（无 LLM），按 out_of_scope/`no_progress`/`no_evidence`/`node_error` 分支；追加 ≤3 条校验错误与免责声明；最小 structured | — |
 
-`StateGraph` 的 `State` 用 `TypedDict`（或 Pydantic）声明，跨节点流转、由节点以增量方式更新（`Annotated[list, add_messages]` 走 reducer）。关键字段如下：
+## 5. GraphState 状态设计（`graph/state.py`）
 
-| 字段 | 类型 | reducer / 说明 | 写入节点 |
+`TypedDict(total=False)`，`messages` 为**普通 list 追加**（OpenAI 风格 dict，由 `Agent.run` 管理，**不用 `add_messages` reducer**）：
+
+| 字段 | 类型 | 写入者 | 说明 |
 |---|---|---|---|
-| `messages` | `Annotated[list[BaseMessage], add_messages]` | 对话上下文（含用户/助理/工具消息） | Router、Synthesizer |
-| `original_query` | `str` | 用户原始输入 | 入口 |
-| `intent` | `"market" \| "report" \| "compare"` | 路由后的意图分类 | Router |
-| `retrieval_plan` | `{tools: [...], concepts: [...], filters: {...}}` | 该意图的「该调哪些工具、该检索哪些概念、过滤条件」计划（含改写后查询） | Router |
-| `tool_evidences` | `list[Evidence]` | 工具调用产生的结构化证据 | Tool/RAG |
-| `rag_chunks` | `list[RagChunk]` | RAG 命中文档块（含元数据） | Tool/RAG |
-| `evidence` | `list[Evidence]` | **整合后**的统一证据集（去重、冲突标记） | Synthesizer |
-| `claims` | `list[Claim]` | 基于证据的候选声明 | Synthesizer |
-| `verification` | `VerificationResult` | 质量自检结论（`passed` + 原因列表） | Synthesizer（自检） |
-| `citations` | `list[Citation]` | 引用溯源 | Synthesizer |
-| `structured_output` | `StructuredAnswer` | 最终结构化答案（含 `disclaimer`） | Synthesizer / Fallback |
-| `retry_count` | `int` | 质量自检回环次数 | Synthesizer（自检） |
-| `out_of_scope` | `bool` | 目标超出标的范围 | Router |
-| `fallback_reason` | `str \| None` | 兜底原因（超时/无证据/超范围/自检不通过） | Tool/RAG、Synthesizer、Fallback |
+| `messages` | `list[dict]` | Agent.run | user/assistant/tool 完整上下文 |
+| `original_query` | `str` | 初始 state | 用户原始问题 |
+| `rewritten_query` | `str` | rewrite_query | 供 RAG 检索的改写查询 |
+| `intent` | `str | None` | router | `market`/`report`/`compare` |
+| `out_of_scope` | `bool` | router | 越界 → fallback |
+| `retrieval_plan` | `list[dict]` | **无人写入（死字段）** | 声明于 state，实际计划是 `_rag_retrieve` 内局部 `RetrievalPlan` |
+| `tool_results` | `list[ToolResult]` | tool_rag | 工具返回向量 |
+| `evidence` | `list[dict]` | tool_rag | `{source_type, source, content, cite?, params?}` 合并视图 |
+| `rag_chunks` | `list[Any]` | tool_rag | `RagChunk`，非空即 RAG 证据可用 |
+| `request_params` | `dict | None` | tool_rag | 归一化参数（ts_code/日期/adj/期数） |
+| `validation_errors` | `list[str]` | tool_rag | 友好的校验失败信息（一等公民） |
+| `final_answer` | `str | None` | synthesizer/fallback | 最终文本 |
+| `citations` | `list[str]` | synthesizer | `sorted(set(evidence 来源))` |
+| `structured` | `dict | None` | synthesizer/fallback | answer/intent/strategy/sources/citations/claims/metadata |
+| `usage` | `dict | None` | — | token 用量 |
+| `stopped_reason` | `str` | 各终止节点 | `end_turn` / `fallback`（兜底文案）/ `error`（Agent 层） |
 
-```python
-from typing import Annotated, Any, Literal, TypedDict
-from langgraph.graph.message import add_messages
+## 6. Agent 薄壳（`agents/agent.py`）
 
-Intent = Literal["market", "report", "compare"]
+`Agent(llm, tools, config)` 是叠加在编译图上的薄壳：
 
-class GraphState(TypedDict):
-    messages: Annotated[list[Any], add_messages]      # BaseMessage 列表
-    original_query: str
-    intent: Intent | None                              # 路由意图（None=未定）
-    retrieval_plan: dict[str, Any]                     # tools / concepts / filters
-    tool_evidences: list["Evidence"]
-    rag_chunks: list["RagChunk"]
-    evidence: list["Evidence"]
-    claims: list["Claim"]
-    verification: "VerificationResult | None"
-    citations: list["Citation"]
-    structured_output: "StructuredAnswer | None"
-    retry_count: int
-    out_of_scope: bool
-    fallback_reason: str | None
-```
+- `_get_tool_defs()`：懒加载 `await tools.list_tools()`（MCP 自动发现并打印清单）。
+- `_get_retriever()`：懒加载；**`cfg.rag_http_url` 非空 → `HttpRetriever(url, timeout=rag_http_timeout, token=rag_http_token)`**（本进程不开 Milvus）；否则 `rag.runtime.build_runtime_retriever(cfg)`（`has_index` 快载或按 `RAG_CORPUS_DIR` 摄取）；**任何构建异常 → 打印并返回 `None`**（检索退化、不崩）。
+- `_get_graph()`：一次性 `build_research_graph(llm, tools, tool_defs, max_tokens, disclaimer, base_system=system_prompt, retriever=retriever)`。
+- `run(user_input, *, history, on_text, on_thinking, on_tool, on_process)`：`messages = history + [user]`，初始 state 种子（`original_query`、`out_of_scope=False`、空 list、`stopped_reason="end_turn"`）→ `ainvoke`。
+  - 图抛 `Exception`（含 `ExceptionGroup`）→ 返回 `AgentResult(final_text=f"处理失败：{type(exc).__name__}…", stopped_reason="error", …)`。
+  - **不捕 `BaseException`**（`asyncio.CancelledError`、客户端断连/`task.cancel()` 照常透传）——避免 LangGraph 把节点异常汇成 `ExceptionGroup` 上抛。
+- 归一化：`AgentResult(final_text, stopped_reason, messages, tool_results, usage, citations, structured)`。
 
-> 注：`Evidence` / `Claim` / `Citation` / `RagChunk` / `VerificationResult` / `StructuredAnswer` 可用 Pydantic 定义（见第 9 / 10 / 11 节）。`messages` 与 `tool_evidences` 等采用**追加式 reducer**，多轮、多源结果不会互相覆盖。
+## 7. 接口契约层（`interfaces/`）
 
----
+- `types.py`：`ToolSpec{name, description, input_schema}`、`ToolResult{content, is_error}`、`ToolUse{id, name, input}`、`ChatResponse{stop_reason, tool_uses, raw_content, text, thinking, usage}`、`AgentResult{final_text, stopped_reason, messages, tool_results, usage, citations, structured}`。
+- `llm_client.py`（`@runtime_checkable` Protocol）：`async chat(*, messages, tools, system, max_tokens, stream=True, temperature=None, on_text, on_thinking) -> ChatResponse`；`assistant_message(resp) -> dict`；`tool_results_messages(results) -> list[dict]`（消息帧由 LLM 实现渲染 → 换后端不改图）。
+- `tool_provider.py`（Protocol）：`async list_tools() -> list[ToolSpec]`；`async call_tool(name, arguments=None) -> ToolResult`（约定「吞异常转 `is_error=True`」）。
+- RAG 计划/结果类型在 `rag/schemas.py`（`RetrievalPlan`、`RagChunk`、`CiteRef`、`RagFilters`），不在 interfaces（RAG 是可注入组件而非基础协议）。
 
-## 6. 节点清单
+## 8. providers
 
-| 节点 | 归属层 | 职责 | 输入（从 State） | 输出（写回 State） |
-|---|---|---|---|---|
-| `router` | graph | 意图识别三分（market / report / compare）+ 查询改写 + 产出 `retrieval_plan`；越界判断 → `out_of_scope` | `messages`、`original_query` | `intent`、`retrieval_plan`、`out_of_scope` |
-| `tool_rag` | graph → providers/tools + rag | 按 `retrieval_plan` 并行调用 MCP 工具（官方 MCP，运行时自动发现）与向量/混合检索；保留重试/超时/`is_error`/权限提示 | `retrieval_plan`、`intent` | `tool_evidences`、`rag_chunks`（→ `evidence`） |
-| `synthesizer` | graph | 多源整合（去重/冲突标记）→ 生成 `claims` → 质量自检（数量级/时间/证据匹配/冲突）→ 引用溯源 + 组装 `StructuredAnswer`（含 `disclaimer`） | `tool_evidences`、`rag_chunks`、`retry_count` | `evidence`、`claims`、`verification`、`citations`、`structured_output`、`retry_count` |
-| `fallback` | graph | 受控兜底（超时/无证据/超范围/自检不通过）：输出 `structured_output(is_reliable=False)` + `fallback_reason` + 免责声明，可落库 | `out_of_scope`、`retry_count`、各证据、`fallback_reason` | `structured_output`、`fallback_reason` |
+### 8.1 tools/mcp.py（`MCPToolProvider`）
 
-```python
-# 构图骨架（示意）
-from langgraph.graph import StateGraph, START, END
+包裹一个复用整会话的 `mcp.ClientSession`：`list_tools` 自动发现 + 一次性打印清单；`call_tool` 的 `read_timeout_seconds` 是 **`timedelta` 不是秒**。重试语义（`mcp_retries` 次、退避 `min(0.5*2**attempt, 2.0)`）**同时适用三类**：
 
-def build_agent_graph() -> StateGraph:
-    g = StateGraph(GraphState)
-    g.add_node("router", router)
-    g.add_node("tool_rag", tool_rag)      # 内部可并行：工具调用 + 检索
-    g.add_node("synthesizer", synthesizer)
-    g.add_node("fallback", fallback)
+1. 抛出的异常（连接/超时等）→ 重试，耗尽 → `is_error=True`；
+2. `result.isError` 或解析 JSON 的 `code!=0`（`_is_business_error`）→ **也重试**；
+3. 耗尽后仍业务失败：文案含「积分/权限/无权限/提升/points」→ `is_error=False` 的友好中文提示（让 LLM 转述「积分不足」）；其它业务失败 → 保留原文 + `is_error=last_was_error`。
 
-    g.add_edge(START, "router")
-    # 意图路由：三类意图都进 tool_rag（各自的 retrieval_plan 不同）
-    g.add_edge("router", "tool_rag")
-    # tool_rag → synthesizer；异常则 fallback
-    g.add_conditional_edges(
-        "tool_rag",
-        should_fallback_after_tools,      # 超时/无证据/权限失败 → fallback
-        {"continue": "synthesizer", "fallback": "fallback"},
-    )
-    # synthesizer 质量自检：不通过且未超限 → 回环（继续该节点），否则 fallback / END
-    g.add_conditional_edges(
-        "synthesizer",
-        route_after_synthesize,           # end / fallback / (内部重试由 RecursionLimit 限界)
-        {"end": END, "fallback": "fallback"},
-    )
-    g.add_edge("fallback", END)
-    return g
-```
+### 8.2 tools/stocks.py（`StockToolProvider`，语义工具层）
 
----
+硬允许列表 `ALLOWLIST = ("002594.SZ","300750.SZ")`（`DEMO_STOCKS`），对外只暴露 4 个语义工具（隐藏通用 `query`）：
 
-## 7. 工具调用（复用现有）
-
-Tool/RAG 节点**不重造轮子**，直接复用现有数据链路与错误语义。
-
-### 7.1 复用点
-
-| 现有构件 | 位置 | 在新图中如何使用 |
+| 工具 | 行为 | 兜底 |
 |---|---|---|
-| `ToolProvider` 协议 | `interfaces/tool_provider.py` | 抽象层面：是否可选工具、如何调用、如何归一化结果 |
-| `MCPToolProvider` / `mcp_tool_provider` | `providers/tools/mcp.py` | 承载真实工具；`call_tool` 内建**重试 + 超时(读超时用 `timedelta`)**，异常与业务失败均重试，权限类失败返回友好提示(`is_error=False`) |
-| `CompositeToolProvider` | `agents/registry.py` | 多工具源组合、按名分发、未知工具名 → `is_error` |
-| `to_tool_spec` | `providers/tools/mcp.py` | `mcp.types.Tool` → `ToolSpec` |
-| `mcp_server/server.py` | `mcp_server/server.py` | `list_apis(q, limit)` / `get_api_info(api_name)` / `query(api_name, params, fields)`（自建后备，默认停用） |
-| `tushare_mcp_url` | `config/settings.py` | Tushare 官方 MCP 地址（默认 `https://api.tushare.pro/mcp/`，环境变量 `TUSHARE_MCP_URL` 提供含 token 的完整地址） |
-| `mcp_tool_provider(url, ...)` | `providers/tools/mcp.py` | 经 `streamablehttp_client(url)` 连接**Tushare 官方 MCP**，工具运行时自动发现并打印清单，整个会话复用一条连接 |
+| `stock_available` | 列出允许的公司（无参） | — |
+| `stock_realtime_quote` | 最新价/涨跌幅/pe_ttm/pb/总市值 | real-time 失败 → `daily` + `daily_basic` 最后一个交易日 |
+| `stock_price_range` | 区间涨跌幅；`adj` 默认 `qfq`（`hfq/none` 可换），`adj_factor` 不可得 → 实际 none | 由 `return_pct` 的复权收盘价计算 |
+| `stock_financials` | 逐期营收/净利/毛利率/负债率/净利率/roe/eps（`income`+`fina_indicator`） | `STOCK_FINANCIAL_PERIODS=8` 期 |
 
-> **官方 MCP 工具约定**（已在真实接入中验证）：工具入参是接口自身字段（`ts_code` / `start_date` / `end_date` …），**日期一律用 `YYYYMMDD`（不带横线）**、`fields` 传数组；返回是数据数组，`[]` 表示该查询无数据。
+错误映射（**关键约定**）：`StockInputError`（输入非法，可自纠）与 `StockBusinessError`（业务失败，含 `permission` 标记）→ **`is_error=False`**（LLM 读友好文案自行调整）；`StockFetchError`（取数失败）→ **`is_error=True`**。只对抛出的异常重试，业务结果不重试（与 MCP 层一致）。
+输出契约：`{"ok": true, "tool", "company"?, "ts_code"?, "data", "source": {"api": [...], "params"?, "adj"?, "fallback"?}}`。纯函数校验层（可单测）：`resolve_stock` / `parse_date` / `normalize_date_range` / `normalize_adj` / `normalize_period`。
 
-### 7.2 两层错误语义如何进入证据模型
+### 8.3 llm/deepseek.py（`DeepSeekLLMClient`）
 
-官方 MCP 返回 `{code, msg, row_count, data}`（业务失败时 `code != 0`）。在 `MCPToolProvider` 侧**统一按「失败」对待并重试**，重试耗尽后按情形建模进证据：
+OpenAI 兼容 `AsyncOpenAI`；`chat(stream=True)` 逐 delta：text → `on_text`、`reasoning_content` → `on_thinking`、工具调用按 `tc.index` 分片聚合、usage 任意 chunk 捡起；非流式 `_chat_once` 解析 tool_calls 为 `ToolUse` + 原始 dict；`map_finish`：tool_calls→`tool_use`、length→`max_tokens`、stop/None→`end_turn`。`llm/mock.py` `MockLLM` 弹预置回复并重放回调（测试用）。
 
-- **传输/超时异常**（代理不可达 / HTTP 401 / HTTP ≥400 / MCP 读超时）→ `call_tool` 重试耗尽后返回 `ToolResult(is_error=True)`；Tool/RAG 节点置 `Evidence(observed=False, is_error=True)`，供 **Synthesizer 质检 / Fallback 判定**「该路取数失败」。
-- **业务失败**（HTTP 200 + `code != 0`，如「无权限需提升积分」）→ 视为**业务失败并重试**（异常也重试、业务失败也重试；不会崩图，也不会被当作成功证据）。重试耗尽后按是否**权限类**分流：
-  - **权限类失败**（`msg` 含「积分/权限/无权限/提升/需提高/points」等）→ 返回**友好提示**（`is_error=False`），内容明确「该接口需更高积分或当前账号无权限，请告知用户积分不足或改用其它接口」，由 LLM **如实转述**而不假装取到数。Tool/RAG 节点置 `Evidence(observed=False, is_error=False, metadata={"permission_denied": True})`。
-  - **其它业务失败** → 保留原始 `code/msg`（`is_error` 取当前值），`Evidence(observed=False, metadata={"raw_code": code})`。
+## 9. 会话持久化（`db/`）
 
-> `ToolResult` 只有 `content` 与 `is_error` 两个字段（`interfaces/types.py`）。Tool/RAG 节点需解析 `content` 中的 JSON，用 `code` 区分「业务失败」与「真正成功」，并把**权限类失败**归一化为 `is_error=False` 的友好证据，避免 LLM 被反复重试带入死循环、或把权限问题误报为「取到数据」。
+`ChatHistoryStore`（SQLAlchemy 2.0 异步 + aiosqlite；`demo.db` 即历史库）：
 
-### 7.3 思考轨迹透传
-
-现有 Web 用 `on_tool(name, args, result)` 抛出每次工具调用形成「思考轨迹」。在新图里可等价地：
-
-- 优先用 **`StreamMode="messages"` / `astream_events`** 拉取「Tool/RAG 节点开始/结束」事件（`on_tool_start`/`on_tool_end`）→ 前端 chip（✔/✖）；
-- 或给节点挂回调 / `checkpointer`，在节点返回时读取 `tool_evidences` 增量。
-
-二者都能在不改动前端事件协议的条件下，把工具轨迹继续以 SSE `tool` 事件吐出。
-
----
-
-## 8. RAG 检索（全新 `demomcp/rag/`）
-
-RAG 为**全新组件**，归属 **Tool/RAG 节点**，用于给结论补充非结构化「金融知识文档」佐证。语料来自外部金融/投研文档，经**离线摄取**入库。
-
-### 8.1 组件职责
-
-| 组件 | 模块建议 | 职责 |
-|---|---|---|
-| `embedder` | `demomcp/rag/embedder.py` | 用本地 embedding 模型（如 `bge` 系列 / `sentence-transformers`）把文本与 query 编码成向量；**本地运行，不依赖外部 API** |
-| `vector_store` | `demomcp/rag/store.py` | 本地向量库（`Chroma` 或 `FAISS`），存 `<doc_id, chunk_index, text, embedding, metadata>` |
-| `retriever` | `demomcp/rag/retriever.py` | 相似度 top-k + 相关度阈值过滤，返回 `RagChunk` |
-| `ingest` | `demomcp/rag/ingest.py` | 摄取脚本：加载文档 → 切块（chunk）→ 嵌入 → 入向量库 |
-| `schemas` | `demomcp/rag/schemas.py` | `RagChunk` / `DocMeta` 等 Pydantic 结构 |
-
-### 8.2 检索流程
-
-```
-路由后的 query（或拆出的检索子句）
-        │  embedder.encode(query)
-        ▼
-        向量相似度 top-k
-        │  过滤阈值 / 去重（按 doc_id+chunk_index）
-        ▼
-RagChunk 集合 ─── 携带元数据 doc_id / doc_title / chunk_index / score
-        ▼
-        进入 synthesizer（多源整合）
-```
-
-```python
-# RagChunk（示意）
-class RagChunk(BaseModel):
-    doc_id: str
-    doc_title: str
-    chunk_index: int
-    text: str
-    score: float                      # 相似度（越大越相关）
-    metadata: dict[str, Any] = {}
-```
-
-### 8.3 语料与来源策略
-
-- **语料内容**：外部金融/投研知识文档（公司基本面、行业分析、指标说明等）。
-- **切块策略**：按语义/标题切块，保留`doc_id + chunk_index`，块间可留少量重叠以保上下文。
-- **来源可溯源**：每个 chunk 记录 `doc_id / doc_title / chunk_index`，供 `synthesizer` 做引用定位；`metadata` 留存文档来源 URL/入库时间，供人工核对。
-- **更新**：文档更新后重跑 `ingest`（增量或全量重建索引），不改变图结构。
-
----
-
-## 9. 多源信息整合（Synthesizer 内）
-
-`Synthesizer` 把「工具证据」与「RAG 证据」融合成可信的统一证据集，再提炼候选 `claims`。
-
-### 9.1 `Evidence` 统一结构
-
-```python
-class Evidence(BaseModel):
-    source_type: Literal["tool", "rag", "user"]
-    source_id: str                    # 工具：api_name / 参数；RAG：doc_id#chunk_index
-    content: str                      # 关键内容（工具数据摘要 / 文档块文本）
-    data: dict[str, Any] | None       # 结构化的工具数据（code/row_count/rows…）
-    is_error: bool = False            # 是否取数失败
-    observed: bool = True             # 是否真的观测到数据（code!=0 时 False）
-    confidence: float = 0.8           # 来源可信度
-    metadata: dict[str, Any] = {}     # 时间范围 / 单位 / 文档标题 等
-```
-
-### 9.2 整合职责
-
-| 步骤 | 说明 |
-|---|---|
-| 归一化 | 把 `tool_evidences` 与 `rag_chunks` 各自映射成 `Evidence` |
-| 去重 | 同一 `source_id` / 同一断言只保留一条（取置信度更高者） |
-| 对齐 | 把「相同结论」的多个证据聚合到同一 `claim` 名下，记录 `evidence_refs` |
-| **冲突标记** | 若两来源对同一数量/时间/单位给出矛盾取值 → 在该 `claim` 上打 `conflict` 标记并保留双方证据，供质量自检决策 |
-| 提炼 | 依据证据生成候选 `claims`（每条声明附 `evidence_refs` + 初始置信） |
-
-```python
-class Claim(BaseModel):
-    id: str
-    content: str                          # 一句可核验的声明
-    evidence_refs: list[str]              # 指向 Evidence.source_id
-    confidence: float = 0.8
-    conflict: bool = False                # 是否存在来源冲突
-    scope: dict[str, Any] = {}            # 时间/范围（如 "2026-01", "3600"）
-```
-
----
-
-## 10. 质量自检与兜底判定（Synthesizer 内 + Fallback）
-
-`Synthesizer` 在生成前对整合后的 `claims` + `evidence` 做一次**质量/一致性自检**，并决定继续 / 回环 / 兜底。
-
-### 10.1 自检维度
-
-| 维度 | 说明 |
-|---|---|
-| 数量级 / 单位一致 | 各来源对同一指标的量级、单位是否吻合 |
-| 时间范围一致 | 结论的时间跨度与数据/文档覆盖是否对得上 |
-| 证据与结论匹配 | `claim` 是否真的被其 `evidence_refs` 支撑（防幻觉/张冠李戴） |
-| 来源可信度 | 低置信 / `is_error` 的证据是否过度支撑了强结论 |
-| 冲突/矛盾检测 | `claim.conflict` 的冲突是否有合理解释，还是硬伤 |
-
-### 10.2 输出与兜底策略
-
-```python
-class VerificationResult(BaseModel):
-    passed: bool                       # 整体是否通过
-    reason: str                        # 通过/不通过的一句话原因
-    issues: list[str] = []             # 不通过的具体问题（时间/单位/冲突/证据不足…）
-    retry_count: int = 0               # 已自检回环次数
-```
-
-- 若 `passed`：Synthesizer 走正常结构化 + 引用 + 免责声明。
-- 若 **不通过 且 `retry_count < SYNTH_MAX_RETRY`（默认 2）**：`retry_count += 1`，回到 Tool/RAG 重新取数/检索（针对 `issues` 定向调整：换工具参数、改检索子句、扩时间范围、降冲突来源权重）。用 `RecursionLimit` / 次数守卫兜底防死循环。
-- 若 **不通过 且 `retry_count ≥ SYNTH_MAX_RETRY`**：走 **Fallback** 以**兜底**模式输出——`StructuredAnswer.is_reliable=False`、相关 `claim` 置信下调、在 `citations` 中列出冲突/缺失证据、正文标注「需人工核实」。
-
-> 回环是**有损但受控**的：用 `retry_count` 上限避免死循环（也可用 `RecursionLimit` 兜底），超限即降级走 Fallback 而非抛出。
-
----
-
-## 11. 引用溯源与结构化输出（Synthesizer 产出）
-
-`Synthesizer` 为终止前节点：为每个 `claim` 建立引用，并组装最终结构化答案（含免责声明）。`Fallback` 也产出同一结构（`is_reliable=False`）。
-
-### 11.1 引用模型
-
-```python
-class Citation(BaseModel):
-    claim_id: str                      # 引用了哪条声明
-    source_type: Literal["tool", "rag"]
-    source_id: str                     # 工具：api_name|params；RAG：doc_id#chunk_index
-    title: str                         # 工具名 / 文档标题
-    excerpt: str                       # 摘要片段（RAG 取 chunk 前 N 字；工具取数据摘要）
-    page: str | None = None            # 文档页码/定位（若有）
-    link: str | None = None            # 文档来源 URL / 数据代理端点
-```
-
-### 11.2 结构化输出 schema（含免责声明）
-
-```python
-class StructuredAnswer(BaseModel):
-    answer: str                        # 面向用户的中文总结
-    is_reliable: bool = True           # 整体可靠性（兜底时 False）
-    claims: list[Claim]                # 结构化声明列表
-    citations: list[Citation]          # 引用溯源
-    disclaimer: str = "以上内容基于公开数据整理，仅供研究参考，不构成投资建议。"  # 免责声明
-    unresolved: list[str] = []         # 未能核实的点 / 冲突未决项
-    usage: dict[str, Any] | None = None  # token 用量（透传现有）
-```
-
-- 每个 `claim` 至少挂一条 `Citation`；「无来源」的结论不允许进入 `claims`（强制可溯源）。
-- `answer` 面向用户，`claims`/`citations`/`disclaimer` 供机器与前端结构化展示。
-
----
-
-## 12. 与现有代码的映射 / 复用（带路径）
-
-| 现有构件 | 路径 | 在新图中的角色 |
-|---|---|---|
-| 数据类型 `ToolSpec` / `ToolResult` / `ToolUse` / `AgentResult` | `demomcp/interfaces/types.py` | 中立数据契约；证据模型可从中派生/转换 |
-| `ToolProvider` 协议 | `demomcp/interfaces/tool_provider.py` | 工具抽象（`list_tools` / `call_tool`），Tool/RAG 节点的数据来源 |
-| `LLMClient` 协议 | `demomcp/interfaces/llm_client.py` | LLM 抽象（`chat` / `assistant_message` / `tool_results_messages`），Router/Synthesizer/Fallback 使用 |
-| `MCPToolProvider` / `mcp_tool_provider` | `demomcp/providers/tools/mcp.py` | 真实工具来源：经 HTTP(streamable-http) 连 Tushare 官方 MCP；工具自动发现+打印清单，重试+超时+权限失败友好提示语义复用 |
-| `FakeToolProvider` | `demomcp/providers/tools/fake.py` | 离线测试替身（新图节点测试沿用） |
-| `CompositeToolProvider` | `demomcp/agents/registry.py` | 多工具源组合 + 按名分发 |
-| `DeepSeekLLMClient` | `demomcp/providers/llm/deepseek.py` | LLM 节点后端：流式 / reasoning_content / tool_calls 渲染 |
-| `MockLLM` | `demomcp/providers/llm/mock.py` | 离线 LLM 替身（图节点测试沿用） |
-| MCP 工具 | 官方 MCP（`TUSHARE_MCP_URL`） | 工具调用数据来源（运行时自动发现）；内置 `mcp_server/server.py` 仅后备 |
-| `tushare_mcp_url` | `demomcp/config/settings.py` | 官方 MCP 连接地址（`TUSHARE_MCP_URL`，含 token） |
-| `Settings` | `demomcp/config/settings.py` | 配置落点（新增 RAG/图/免责声明配置字段） |
-| `ChatHistoryStore` / `build_store` | `demomcp/db/store.py` | 会话持久化；`checkpointer` 可与之对接 |
-| `ChatMessage` / `ChatTurn` | `demomcp/db/models.py` | 现有日志 + 精确恢复；结构化输出落库可扩展 |
-
-> **关键复用原则**：`interfaces` 与 `providers/tools`、`providers/llm` 均保持「仅依赖接口」的现状，LangGraph 的 `graph` 只把它们当可注入的依赖使用，不侵入数据层与 LLM 适配层。
-
----
-
-## 13. 新增组件、配置与依赖
-
-### 13.1 新增包
-
-| 模块 | 职责 |
-|---|---|
-| `demomcp/graph/` | `state.py`(State) + `nodes.py`(router/tool_rag/synthesizer/fallback) + `builder.py`(构图) + `routes.py`(条件边) |
-| `demomcp/rag/` | `embedder.py` / `store.py` / `retriever.py` / `ingest.py` / `schemas.py` |
-| `demomcp/schema/`（或并入 `interfaces`） | `Evidence` / `Claim` / `Citation` / `RagChunk` / `VerificationResult` / `StructuredAnswer` 等 Pydantic |
-
-### 13.2 新增依赖（`pyproject.toml` `dependencies`）
-
-| 依赖 | 用途 |
-|---|---|
-| `langgraph` | 状态图编排（核心） |
-| `chromadb` 或 `faiss` | 本地向量库（二选一） |
-| `sentence-transformers`（含 `bge` 系） | 本地 embedding 模型 |
-| `langchain-openai` / `langchain-community`（**可选**） | 若 LLM 节点/检索用 LangChain 生态封装；非必需，也可继续直接用现有 DeepSeek 适配 + 自写 retriever |
-
-> `mcp` 仍钉 `>=1.28,<2`（FastMCP）；新增依赖勿与其冲突。容器用 `uv sync --no-dev` 时 RAG 依赖属运行时依赖，应计入 `dependencies`。
-
-### 13.3 新增配置（`config/settings.py` 落点）
-
-| 环境变量 | 默认 | 说明 | 消费节点 |
-|---|---|---|---|
-| `VECTOR_STORE_PATH` | `<root>/data/vectorstore` | 本地向量库地址 | Tool/RAG |
-| `EMBEDDING_MODEL` | `BAAI/bge-small-zh-v1.5` | 本地 embedding 模型 | Tool/RAG |
-| `RAG_TOP_K` | `5` | RAG top-k 检索条数 | Tool/RAG |
-| `RAG_SCORE_THRESHOLD` | `0.3` | 相似度过滤阈值 | Tool/RAG |
-| `RAG_CHUNK_SIZE` / `RAG_CHUNK_OVERLAP` | `800` / `150` | 摄取切块参数 | Tool/RAG |
-| `SYNTH_MAX_RETRY` | `2` | 质量自检回环上限 | Synthesizer |
-| `DISCLAIMER` | 默认投研免责声明文本 | 结构化输出附带的免责声明 | Synthesizer / Fallback |
-
----
-
-## 14. 扩展点与后续演进
-
-| 演进方向 | 怎么做 |
-|---|---|
-| 换 LLM 后端 | `graph` 节点只依赖 `LLMClient`；换实现（如本地模型）即可，不动图结构 |
-| 换向量库 | 仅改 `rag/store.py` 与 `retriever.py`（保持 `RagChunk` 契约） |
-| 加第三路源 | 在 Tool/RAG 的 fan-out 里多一路（如网页检索），`synthesizer` 归一化即可 |
-| 加新意图 | 扩展 `intent` 联合类型与 `router` 的路由表，新增对应 `retrieval_plan` |
-| 结构化输出落库 | `ChatTurn` 扩展字段或新增表，存 `structured_output` / `citations`，`/api/sessions/{id}` 提供结构化视图 |
-| 检查点持久化 | 用 LangGraph `checkpointer`（配合现有 `store` 或 `SqliteSaver`）精确恢复单轮中间态 |
-| 流式增强 | `StreamMode="messages"` 逐 token 流式；`synthesizer` 支持分段流式补全 |
-| 可观测 | `astream_events` / 回调打印每个节点起止、`tool_evidences` 增量、`fallback_reason` |
-
----
-
-## 附录 A：完整流程图（含路由、回环与兜底）
+- `ChatMessage`：`session_id/role/content/is_error/created_at` —— 可读日志（含 `role=tool|error`）。
+- `ChatTurn`：`session_id/messages(JSON)` —— 每轮**完整累积** OpenAI 消息（含 tool_calls/tool_call_id），供 `last_turn_messages` 精确恢复。
+- `ChatTurnData`：`session_id/data(JSON)` —— 每轮 UI payload（thinking/steps/answer/sources/citations/claims/metadata/intent/strategy/stopped_reason/usage/error），由 `/api/sessions/{id}/turns` 回传。
 
 ```mermaid
-flowchart TD
-    START([START]) --> ROUTER[router\n意图识别与路由]
-    ROUTER -->|"market/report/compare"| TR[tool_rag\n工具执行 + 向量/混合检索]
-    TR -->|"有证据"| SYN[synthesizer\n整合/质检/引用/结构化]
-    TR -->|"超时/无证据/权限"| FB[fallback\n受控兜底]
-    SYN -->|"passed"| OUT[structured_output\n含 disclaimer]
-    SYN -->|"fail & retry<max"| TR
-    SYN -->|"fail & retry>=max"| FB
-    OUT --> REL{is_reliable?}
-    REL -->|true| END([END])
-    REL -->|false| CAV[[降置信 + 标注「需人工核实」]] --> END
-    FB --> END
+erDiagram
+    CHATMESSAGE {
+        int id PK
+        string session_id "indexed"
+        string role "user/assistant/tool/error"
+        text content
+        bool is_error
+        datetime created_at
+    }
+    CHATTURN {
+        int id PK
+        string session_id "indexed"
+        text messages "累计 OpenAI 消息 JSON"
+        datetime created_at
+    }
+    CHATTURNDATA {
+        int id PK
+        string session_id "indexed"
+        text data "每轮 UI payload JSON"
+        datetime created_at
+    }
 ```
 
-## 附录 B：示例数据流（「贵州茅台最近一个月的日线」）
+> 三者以 `session_id` 逻辑关联（无外键）；**`create_all` 不会 ALTER 既有表** —— 改了 `models.py` 后需删旧库（schema 漂移会 500）。
 
-1. **入口**：`original_query = "贵州茅台最近一个月的日线"`；`messages` 追加一条 user。
-2. **`router`**：识别为 `intent="market"`（纯查行情）；`retrieval_plan = {tools: [daily], concepts: ["日线", "复权"], filters: {ts_code: "600519.SH", start_date: "20260725", end_date: "20260825"}}`；`out_of_scope=False`。
-3. **`tool_rag`**（并行）：
-   - 工具：调官方 MCP `daily`（`ts_code=600519.SH, start_date=20260725, end_date=20260825`，**`YYYYMMDD` 格式**）→ `tool_evidences[{source_id="daily|600519.SH|...", data={code:0, rows:[...]}, confidence=0.95}]`。
-   - 检索：对「贵州茅台 / 日线 口径」检索 → 1–2 个 chunk（`doc_id="finance#maotai", chunk_index=…`），含复权口径说明。
-4. **`synthesizer`**：合并 → `evidence`；形成 `claims`（如「近一个月收盘价区间」「是否前复权口径」）；校验时间范围/单位/复权口径 → `passed`；组装 `StructuredAnswer`——`answer`（中文总结）+ `claims` + `citations`（`daily|600519.SH|…`、`finance#maotai#2`）+ `disclaimer`（默认免责声明）+ `is_reliable=true`。
-5. **正常收尾**：`fallback_reason=None`。
+## 10. RAG 接线（摘要，细节见 `RAG_INTEGRATION.md`）
 
-> **兜底示例**：若用户问「贵州茅台近一个月财报」而 `intent="report"` 但语料库无该财报细节（无匹配证据），或工具超时，则 `tool_rag → fallback`：输出 `StructuredAnswer(is_reliable=False, answer="未能取到可核验的财报细节，建议核实数据源或改用其它范围。", disclaimer=默认声明, unresolved=[...])`，并落库兜底轨迹。
+RAG **已接入实时图**：`tool_rag` 节点在单回合 LLM 选工具后，`asyncio.gather` 并行执行「RAG 检索」与「全部工具调用」；检索非空（且工具证据为空）时 `synthesizer` 只基于 RAG 证据生成。`market` 意图跳过 RAG（纯行情走工具）。
 
----
+```mermaid
+flowchart LR
+    A["Agent._get_retriever"] --> B{RAG_HTTP_URL 非空?}
+    B -->|是| H["HttpRetriever<br/>POST /api/rag/retrieve<br/>Bearer + 20s"]
+    B -->|否| R["runtime.build_runtime_retriever<br/>has_index → load_index 快路径<br/>否则按 RAG_CORPUS_DIR 摄取"]
+    H --> RP["RetrievalPlan{rewritten_query,<br/>concepts, filters, strategy}"]
+    R --> RP
+    RP --> C["hybrid_retriever.retrieve<br/>三路 RRF → 重排 → 阈值/截断"]
+    C --> E["RagChunk → chunk_to_cite_ref<br/>→ evidence(source_type='rag')"]
+    E --> T["tool_rag: asyncio.gather<br/>(检索 ∥ 工具调用)"]
+    T --> S["evidence = 工具 + RAG 合并<br/>_evidence_digest → synthesizer"]
+```
 
-*文档基于仓库现状撰写；所有「现有」路径/构件均已核对存在。新增组件（`graph` / `rag`）与依赖（`langgraph` 等）为前瞻设计，落地时再行实施。*
+- `RetrievalPlan` 以 `state.rewritten_query or original_query` 为查询、`extract_concepts` 提概念、`infer_filters` 从硬编码别名表（比亚迪/宁德时代）提 `RagFilters{company,year}`、`_strategy(intent)` 映射：`report→factual`、`compare→structural`、其它→`auto`。
+- 证据条目 `source_type="rag"`，摘要 `cite` 由 `rag/citing.py` 确定性生成（`[公司·年份年报 - 第X页 章节]`，**不靠 LLM 编页码**）。
+- `rag/retriever.py` 的 `NullRetriever` 为**遗留占位、无引用**；`rag/__init__.py` 保持无 import（重依赖函数体懒加载）。
+
+## 11. 配置（`config/settings.py`，读 `PROJECT_ROOT/.env`）
+
+非 RAG 全量 + RAG 核心 8 项（RAG 全量表见 `RAG_INTEGRATION.md` §7，`demomcp/config/settings.py` 是唯一事实源）：
+
+| 组 | 变量（默认值） |
+|---|---|
+| LLM | `DS_API_KEY`、`DS_BASE_URL`(api.deepseek.com)、`DS_MODEL`(deepseek-chat)、`DS_STREAMING`(true)、`DS_MAX_TOKENS`(8192) |
+| Agent | `DEMO_SYSTEM_PROMPT`(内置双票金融 prompt：4 语义工具+qfq+如实转述)、`DEMO_MAX_ITERATIONS`(10，**无读取者**)、`DISCLAIMER` |
+| DB | `DEMO_DATABASE_URL`(空→`sqlite+aiosqlite:///{PROJECT_ROOT/demo.db}`；也支持 mysql/asyncmy、postgres/asyncpg) |
+| MCP | `TUSHARE_MCP_URL`(api.tushare.pro/mcp/)、`DEMO_MCP_TIMEOUT`(30s)、`DEMO_MCP_RETRIES`(2) |
+| 语义工具 | `DEMO_STOCKS`(002594.SZ,300750.SZ)、`STOCK_DEFAULT_ADJ`(qfq)、`STOCK_FINANCIAL_PERIODS`(8) |
+| RAG（核心） | `RAG_USE_REAL`(false)、`RAG_VECTOR_STORE_PATH`(root/data/vectorstore)、`RAG_CORPUS_DIR`(空=不自动摄取)、`RAG_HTTP_URL`/`RAG_HTTP_TIMEOUT`(20)/`RAG_HTTP_TOKEN`、`RAG_TOP_K`(5)、`RAG_EMBEDDING_MODEL`(BAAI/bge-m3) |
+| mcp_server（后备） | `MCP_SERVER_HOST`(127.0.0.1)/`MCP_SERVER_PORT`(8765)、`TUSHARE_PROXY_URL`(http://127.0.0.1:8000)、`TUSHARE_API_KEY`、`TUSHARE_PROXY_TIMEOUT` |
+
+## 12. 部署与脚本
+
+- **Dockerfile** 两阶段：① `node:20-alpine` `npm ci && npm run build` → `web/dist`；② `python:3.11-slim` + uv 二进制，`uv sync --no-dev`，非 root `app` 用户，EXPOSE 8010，CMD `uvicorn demomcp.entry.web:app --host 0.0.0.0 --port 8010`。
+- **docker-compose**：单服务 `demo`，端口 `8010:8010`，env_file `.env`，卷 `demo_data → /app/data`（demo.db 与 RAG 向量库落此），`restart: unless-stopped`。
+- **无独立 RAG 端口**：`/api/rag/retrieve`、`/api/rag/health` 挂在 web 8010 上（历史的 `rag_server.log` 即 web 自身日志）。
+- **scripts\**：
+
+| 脚本 | 用途 |
+|---|---|
+| `scripts/smoke_e2e.py` | 真 DS_API_KEY + 官方 MCP 的端到端冒烟 |
+| `scripts/eval_rag.py` | RAG 离线评估（默认合成语料；`--corpus` 真实 PDF；门禁见 RAG_INTEGRATION §8） |
+| `scripts/validate_rag.py` | 真引擎（bge-m3 + reranker）对两份真实年报的验证门禁 |
+| `scripts/dba_rag.py` | 离线批量建索引（`--corpus`/`--rebuild`/`--hashing`） |
+| `scripts/sync_deploy.ps1`（+`sync.cmd`） | rclone SFTP 一键上传云服务器（见 `UPLOAD_GUIDE.md`） |
+
+## 13. 未实现 / 预留 / 遗留（如实清单）
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| 合成器质量自检回环（旧文档 §10 设计） | **未实现** | 图上无回环边；合成失败直接转 fallback 文案 |
+| `RAG_SCORE_THRESHOLD`（0.3） | **声明但无读取者** | settings 里有默认值与别名，代码从未读 |
+| `GraphState.retrieval_plan` | **死字段** | 声明于 state.py，无节点写入 |
+| `RAG_HYBRID_DENSE_WEIGHT`（0.6） | **预留** | 实际检索为三路纯 RRF 融合，无读取者 |
+| `DEMO_MAX_ITERATIONS`（10） | **无读取者** | 图无循环，名字仍留在 settings |
+| `rag/retriever.py` `NullRetriever` | **遗留占位** | 无任何 import；真入口是 runtime/http_retriever |
+| `RAG_HYDE` | **未实现（默认 false）** | 查询扩展开关在 `query_build` 里未启用 hyDE 分支 |
+| `rag_corpus_dir` 自动扫描 docs\ | **未实现** | 仅显式设置 `RAG_CORPUS_DIR` 才摄取；路径启发式：年从文件名、公司从目录/《》 |
+| Milvus-Lite 单写者 | **设计约束** | 非文件锁：web 进程持锁，其它进程用 `HttpRetriever`；`dba_rag --rebuild` 需与 web 错时 |
+| `citation.schemas.Citation` | **声明未用** | 图实际产出 CiteRef 推导的普通 dict |
+| 工具层「未知接口动态发现」、「跨公司结构化合成」等 RAG_FINANCE 未来项 | **未实现** | 见 `RAG_FINANCE.md` |
+
+## 14. 附录
+
+### 14.1 关键文件
+
+`demomcp/graph/{builder,nodes,routes,prompts,state}.py` · `demomcp/agents/agent.py` · `demomcp/providers/llm/{deepseek,mock}.py` · `demomcp/providers/tools/{mcp,stocks,fake}.py` · `demomcp/interfaces/{types,llm_client,tool_provider}.py` · `demomcp/rag/`（`RAG_INTEGRATION.md` §10）· `demomcp/db/{models,store}.py` · `demomcp/config/{settings,env}.py` · `demomcp/entry/{cli,web}.py` · `mcp_server/server.py`（后备）
+
+### 14.2 数据流示例（「比亚迪最近一个月日线」）
+
+router（market）→ rewrite_query（改写但不强制 RAG）→ tool_rag（`_should_rag` 对 market 跳过检索；LLM 选 `stock_price_range`，`resolve_stock` 命 002594.SZ，日期归一化近 30 天，`adj=qfq`）→ 工具返回 `{ok, data, source:{api:[...],adj:qfq}}` → 进 evidence（`source_type=stock_price_range`，`params` 并入 request_params）→ synthesizer 流式中文回答（含免责声明）→ `end_turn`+structured → web 三写落库。若工具取数抛 `StockFetchError` → `is_error=True` 且无其它证据 → `no_evidence` → fallback 文案。
+
+### 14.3 旧版已删除的声明（迁移速查）
+
+下列内容在旧版 `ARCHITECTURE.md` 出现过，**当前代码不存在**：四节点拓扑（现为五节点）；`tool_evidences/claims/verification/structured_output/retry_count` State 字段；`add_messages` reducer；手动 agentic loop（`for _ in range(max_iterations)`）；`agents/registry.py CompositeToolProvider`；Chroma/FAISS + `sentence-transformers` 本地嵌入；`RAG_CHUNK_SIZE=800/150`、`SYNTH_MAX_RETRY` 配置；`StructuredAnswer`/`Claim` Pydantic 模型（现为 `structured: dict`）。

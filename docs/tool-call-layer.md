@@ -1,8 +1,24 @@
 # 工具调用层设计：限定「比亚迪 / 宁德时代」双票数据助手
 
-> 本文档为 **设计文档**，描述 demo-mcp 新增的**客户端语义工具调用层**。它把底层 MCP 取数能力打包成一组**针对两家上市公司**的高级语义工具，并在其上加**参数校验与容错**（代码自动补全、日期格式容错等）。本文是前瞻设计，**不含实现代码**。
+> 本文档为 **设计文档**，描述 demo-mcp 新增的**客户端语义工具调用层**。它把底层 MCP 取数能力打包成一组**针对两家上市公司**的高级语义工具，并在其上加**参数校验与容错**（代码自动补全、日期格式容错等）。
 >
-> 需求来源为 `docs/` 下的两份材料：架构文档 `ARCHITECTURE.md` 与命题 PDF。本文聚焦「工具调用层」，沿用 `ARCHITECTURE.md` 定义的分层（新增 `graph`/`rag` 等为另一演进线，此处不复述）。
+> **实现状态**：该层已按本文设计落地（`demomcp/providers/tools/stocks.py` `StockToolProvider`），与代码冲突处以代码为准。
+
+---
+
+## 实现状态（截至 2026-08-27）
+
+| 主题 | 状态 | 与本文的差异 / 补充 | 代码位置 |
+|---|---|---|---|
+| `StockToolProvider` | ✅ 已实现 | 包裹 `MCPToolProvider`（官方 MCP），`list_tools` 只吐 4 个语义工具 | `providers/tools/stocks.py` |
+| 硬 allowlist | ✅ 已实现 | `ALLOWLIST = ("002594.SZ","300750.SZ")`（`DEMO_STOCKS`）；别名表大小写/空白不敏感 | `stocks.py` |
+| 4 个语义工具 | ✅ 已实现 | 与 §3 一致；`stock_realtime_quote` 兜底 `daily`+`daily_basic`；`stock_financials` 默认 8 期 | `stocks.py` |
+| 参数校验纯函数 | ✅ 已实现 | `resolve_stock`/`parse_date`/`normalize_date_range`/`normalize_adj`/`normalize_period` | `stocks.py` |
+| 错误约定（§4.5） | ✅ 已实现 | 三层：`StockInputError`/`StockBusinessError`(含 permission) → `is_error=False`（LLM 可自纠）；`StockFetchError` → `is_error=True`；与 MCP 层一致「只对抛出的异常重试」 | `stocks.py` |
+| 输出契约（§5） | ✅ 已实现 | `{"ok":true,"tool","company"?,"ts_code"?,"data","source":{"api":[…],"params"?,"adj"?,"fallback"?}}` | `stocks.py::_render_ok` |
+| 系统提示词（§2.4） | ✅ 已完成 | `DEFAULT_SYSTEM_PROMPT` 已改写为「只可用语义工具、仅两家、qfq 默认、如实转述」 | `config/settings.py:12-19` |
+| 注入点（§2.3） | ✅ 已实现 | `cli.py`/`web.py` 在 `async with mcp_tool_provider(...)` 内包 `StockToolProvider` 构 Agent | `entry/cli.py`、`entry/web.py` |
+| 测试（§8） | ✅ 已存在 | `tests/test_stock_input.py` + `test_stock_provider.py` + `test_tool_provider.py`（FakeToolProvider 桩） | `tests/` |
 
 ---
 
@@ -37,7 +53,7 @@
 entry  cli.py / web.py（SSE）
    │  在 async with <底层 mcp 连接> as mcp: 里构造 Agent(tools=StockToolProvider(mcp))
    ▼
-Agent  （demomcp/agents/agent.py，手动 loop，只依赖 ToolProvider）
+Agent  （demomcp/agents/agent.py，薄壳 + LangGraph 五节点，只依赖 ToolProvider）
    │  list_tools() / call_tool(name, args)
    ▼
 StockToolProvider（新增：客户端语义工具层）   ← ★ 本文焦点
@@ -75,7 +91,7 @@ async with mcp_tool_provider(settings.tushare_mcp_url,
 
 ### 2.4 系统提示词随之调整
 
-底层通用场景的 `DEFAULT_SYSTEM_PROMPT`（`config/settings.py`）现在描述「先 list_apis 再 query、字段传 ts_code/日期 YYYYMMDD/code!=0 如实转述」。切换到语义工具面后应同步改写为：**只可用这组语义工具、标的仅两家、日期支持相对/多种格式、复权默认前复权、财务期次如何表达**。设计上新增/调整系统提示词，仍走 `system_prompt`（`DEMO_SYSTEM_PROMPT`）配置项。
+底层通用场景的 `DEFAULT_SYSTEM_PROMPT`（`config/settings.py`）原描述「先 list_apis 再 query、字段传 ts_code/日期 YYYYMMDD/code!=0 如实转述」。**已同步改写为**（`settings.py:12-19`）：**只可用这组语义工具、标的仅两家、日期支持相对/多种格式、复权默认前复权、财务期次如何表达、如实转述不编造**。仍走 `system_prompt`（`DEMO_SYSTEM_PROMPT`）配置项。
 
 ---
 
@@ -332,7 +348,7 @@ async with mcp_tool_provider(settings.tushare_mcp_url,
 | `Settings` | `demomcp/config/settings.py` | 新增配置落点（`Field(default, alias="ENV_NAME")` 风格） |
 | 注入点 | `demomcp/entry/cli.py`、`demomcp/entry/web.py` | 在 `async with mcp_tool_provider(...)` 内注入语义层 |
 
-**测试约定**（未来实现时）：`tests/test_stock_input.py`（resolve/date/adj/period 纯函数用例）、`tests/test_stock_provider.py`（用 `FakeToolProvider` 桩住底层 `query`，验证语义工具的 allowlist、错误约定、字段映射），沿用 `tests/` 现有 `FakeToolProvider` + `MockLLM` 风格。
+**测试约定**（已实现）：`tests/test_stock_input.py`（resolve/date/adj/period 纯函数用例）、`tests/test_stock_provider.py`（用 `FakeToolProvider` 桩住底层 `query`，验证语义工具的 allowlist、错误约定、字段映射），沿用 `tests/` 现有 `FakeToolProvider` + `MockLLM` 风格。
 
 ---
 

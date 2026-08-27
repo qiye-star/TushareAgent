@@ -1,10 +1,27 @@
 # 设计：RAG 财报知识库（A股年报）
 
-> 本文档是 [`docs/ARCHITECTURE.md`](./ARCHITECTURE.md) 第 8 节「RAG 检索（全新 `demomcp/rag/`）」针对 **A股上市公司年报**（PDF，如比亚迪 / 宁德时代 2024 年报）的**专门化设计**。
+> 本文档是 `demomcp/rag/` 针对 **A股上市公司年报**（PDF，如比亚迪 / 宁德时代 2024/2025 年报）的**专门化设计蓝图**。
 >
-> ARCH 的通用五件套（`embedder / store / retriever / ingest / schemas`）与第 4/6 节的 LangGraph 图编排（`rewrite_query → parallel{call_tools, rag_retrieve} → integrate → verify_reasonableness(可回环) → structure_output`）**原样继承**；本文**不重写图结构**，只深化 `rag_retrieve` 内部语义、新增财报专用的解析/检索/引用件，并**扩展**三个契约：`RagChunk.metadata`、`retrieval_plan`、`Citation`。
->
-> 本文是**前瞻性设计**：仓库当前**没有** `demomcp/rag/`、`demomcp/graph/`，也没有 PDF 解析 / 向量库 / embedding 依赖。文中「现有」指 ARCHITECTURE.md 已描述、但**尚未落地**的前瞻构件；「新增」为本文新引入的待落地组件。本文只写设计蓝图，不写实现代码。
+> 图编排（`rewrite_query → parallel{call_tools, rag_retrieve} → integrate → …`）与本文的解析/切块/检索/引用件**大体已按本文落地**（细节以 `RAG_INTEGRATION.md`（当前实现）与代码为准）；本文仍保留「设计为何如此」的动因与评估标准，**不重复实现细节**。文中「现有/未来」措辞为设计视角，不代表实现状态；凡与代码冲突处，**以代码与 `RAG_INTEGRATION.md` / `ARCHITECTURE.md` 为准**。
+
+---
+
+## 实现状态（截至 2026-08-27）
+
+| 主题 | 状态 | 与本文的差异 | 代码位置 |
+|---|---|---|---|
+| `demomcp/rag/` 模块 | ✅ 已实现 | 19+ 模块（含本文未列的 `bm25.py`/`store.py`(MilvusVectorStore)/`fakes.py`），`retriever.py` 为遗留 NullRetriever 占位 | `demomcp/rag/` |
+| LangGraph 图编排 | ✅ 已实现 | **五节点**：router → rewrite_query → tool_rag → synthesizer/fallback；`integrate/verify_reasonableness/structure_output` 分别融入 synthesizer（后者未实现回环） | `demomcp/graph/` |
+| 混合检索 | 🔶 部分 | 已实现但为**三路纯 RRF**（块稠密恒开 + 节稠密 + 节 BM25，`strategy!=factual` 时）——非本文 §5.2 的「加权 dense/BM25」；`RAG_HYBRID_DENSE_WEIGHT` 预留、无读取者 | `rag/hybrid_retriever.py` |
+| 两阶段检索（recall→聚合→rerank） | ✅ 已实现 | 数值默认 50/5/30（本文 §5.7 曾写 30/3/24）；rerank 失败回退 RRF 序且**跳过阈值** | `rag/hybrid_retriever.py` |
+| 元数据过滤（company/year） | ✅ 已实现 | 在线路径 `infer_filters` 可识别比亚迪/宁德时代 → `RagFilters` 生效（旧文中「恒空」已过时） | `rag/query_build.py` + `graph/nodes.py` |
+| 确定性引用 CiteRef | ✅ 已实现 | 格式 `[公司·年份年报 - 第X页 章节]` + 表格题注后缀 | `rag/citing.py` |
+| 持久化 | ✅ 已实现（蓝图未提） | **Milvus-Lite（milvus.db）+ SQLite RelStore（rag_rel.db）**；has_index→load_index 快路径；单写者，多进程走 HTTP | `rag/persist.py` + `rag/runtime.py` |
+| HTTP 检索服务 | ✅ 已实现（蓝图未提） | `/api/rag/retrieve` + `/api/rag/health` 挂 web:8010；`HttpRetriever`（Bearer/20s） | `rag/http_retriever.py` + `rag/server.py` + `entry/web.py` |
+| hyDE / 查询扩展 | 🔶 部分 | 术语键词扩展已实现；hyDE 开关 off（未启用分支） | `rag/query_build.py` |
+| 真模型依赖 | 🔶 部分 | 嵌入/重排走**服务端 API**（bge-m3 / bge-reranker-v2-m3），本地无 torch/faiss/sentence-transformers——与本文一致；向量库为 **pymilvus + milvus-lite**（本文未提） | `pyproject.toml` |
+| 评估 runner | ✅ 已实现 | `scripts/eval_rag.py`（离线门禁）+ `scripts/validate_rag.py`（真引擎）；金标 `tests/rag_golden/` | `scripts/` |
+| 质量自检回环（§7.4/§10.2 verify_reasonableness） | ❌ 未实现 | 图上无回环边；合成失败直接转 fallback | `graph/routes.py` |
 
 ---
 
@@ -86,20 +103,29 @@ class DocMeta(BaseModel):            # 扩展 ARCH §8.1 的 DocMeta
 在 ARCH §3 分层的 `rag` 层之下，再细分出财报专用子模块（其余层复用，不改依赖方向）：
 
 ```
-graph        LangGraph 编排（复用 ARCH §4/§6；rag_retrieve 内部换成 hybrid）
-rag           检索层（新增报表专用子模块）
+graph        LangGraph 编排（已落地为五节点；rag_retrieve 即 tool_rag._rag_retrieve）
+rag           检索层（以下模块均已实现；★ 为本文未预见的后加件）
   +─ pdf_parser.py        PyMuPDF 原生 block（text/image）抽取 + find_tables 表格
   +─ section_tree.py      字号聚类 + 编号正则 → SectionNode 语义树
   +─ table_split.py       表格题注/表头识别、跨页去重合并、行分块、上下文随行
   +─ segments.py          Block 结构 + 块类型判定 + 元数据注入
   +─ chunking.py          块感知 dense 切分（恒有重叠）/ section 整节 / 块边界锚点
   +─ captioner.py         多模态图块描述（Noop 默认 / deepseek-v4-flash-vision-exp 可选）
+  +─ embedder.py          HashingEmbedder（默认） / ApiEmbedder（bge-m3 /embeddings）
+  +─ bm25.py ★            自包含 OKAPI BM25（jieba 词元；iter_state/from_state 可持久化）
+  +─ store.py ★           InMemoryVectorStore / FaissVectorStore / MilvusVectorStore（向量库选择）
   +─ hybrid_retriever.py  BM25(jieba)+dense 混合、元数据过滤、RRF 融合、section 聚合
-  +─ reranker.py          本地交叉编码器重排（可关，回退 RRF）
+  +─ reranker.py          服务端重排（SiliconFlow /rerank，可关，回退 RRF 序）
   +─ query_build.py       从 retrieval_plan 生成 dense/BM25/hyDE 查询 + 术语键词扩展
   +─ citing.py            RagChunk → CiteRef → Citation 映射、reflist 格式化
   +─ schemas.py           扩展：RagChunk / DocMeta + SectionNode / Block / CiteRef
-  +─ ingest.py            9-stage 摄取管线编排
+  +─ ingest.py            9-stage 摄取管线编排（build_index / ingest / RagIndex.add_doc）
+  +─ runtime.py ★         build_runtime_retriever（进程缓存；has_index 快载 / 按 CORPUS_DIR 摄取）
+  +─ persist.py ★         Milvus-Lite + SQLite RelStore：保存/加载/检测索引（含 BM25 状态）
+  +─ http_retriever.py ★  HTTP 检索客户端（另一进程取数，不开 Milvus）
+  +─ server.py ★          retrieve_from / health_from 纯函数（供 web /api/rag/* 用）
+  +─ fakes.py ★           合成语料与假检索器（测试/离线评估）
+  +─ retriever.py         遗留 NullRetriever 占位（无引用）
 interfaces/providers/config/db/entry   全部不变（复用）
 ```
 
@@ -255,7 +281,8 @@ metadata = {
 
 - **chunk 索引（dense，精度）**：小块逐块嵌入（内容含元数据前缀），对事实/数字类查询最利。
 - **section 索引（BM25 为主，结构复用）**：**整节**为一个可检索单元，文本用 BM25（`rank-bm25` + `jieba` 分词，**无长度限制**），辅以「节代表向量 = heading 首 300 字池化 + 平均」仅作补充信号。对结构类查询最利——把「正确的节」整节捞回，其 `section_path` 指向该节所有子块。
-- **融合**：dense 与 BM25 各取 top-k，用 **RRF（Reciprocal Rank Fusion）** 融合，避免不同分数域对齐问题；也可用加权 `RAG_HYBRID_WEIGHTS`（dense 0.6 / bm25 0.4）。
+- **融合**：dense 与 BM25 各取 top-k，用 **RRF（Reciprocal Rank Fusion）** 融合，避免不同分数域对齐问题。
+  > 实现注（2026-08-27）：实际为**三路纯 RRF**（块稠密 + 节稠密 + 节 BM25，`strategy!="factual"` 时后两路参与），分数 `Σ 1/(rank + RAG_RRF_K)`；本文「加权 `RAG_HYBRID_WEIGHTS`」未实现，对应配置是 `RAG_HYBRID_DENSE_WEIGHT`（预留在 settings，无读取者）。
 
 ### 5.3 分节索引（整节为可检索单元）
 
@@ -274,9 +301,9 @@ metadata = {
 
 ### 5.6 两阶段检索设计（recall → section 聚合 → rerank）
 
-- **Stage 1 recall**：元数据过滤（§5.4）→ chunk 与 section **两索引并行**混合检索 → RRF 融合 → 候选（`RAG_CANDIDATE_K=30`）。
-- **Stage 2 聚合 + rerank**：把候选 chunk 按 `section_path` 聚合，用 max 或 RRF 聚合出**候选节**（`RAG_TOP_K_SECTIONS=3`）；每候选节取**前 K 个 chunk**（`RAG_RERANK_CANDIDATES // RAG_TOP_K_SECTIONS`，默认 24÷3=8）构成重排候选池以扩大召回，用 **SiliconFlow `/v1/rerank`（`BAAI/bge-reranker-v2-m3`）** 重排（query × chunk，服务端、复用嵌入 base/key）。阈值 `RAG_RERANK_THRESHOLD=0.3`（bge-reranker-v2-m3 对真实 MD&A 文本分偏低，0.5 过严）+ `RAG_TOP_K=5` → 输出自带 cite_ref 的 `list[RagChunk]`。
-  - 未配置 key / 调用失败 → 回退 `NoopReranker`（用 RRF 分截断，降级路径）。
+- **Stage 1 recall**：元数据过滤（§5.4）→ chunk 与 section **两索引并行**混合检索 → RRF 融合 → 候选（`RAG_CANDIDATE_K=50`）。
+- **Stage 2 聚合 + rerank**：把候选 chunk 按 `(doc_id, section_path)` 聚合**（跨公司同名节不合并）**，得**候选节**（`RAG_TOP_K_SECTIONS=5`）；每候选节取 **best ** (`max(RAG_TOP_K, ceil(RAG_RERANK_CANDIDATES / n_sections))` 个、去重，池硬上限 `RAG_RERANK_CANDIDATES=30`；无 chunk 的节回退节级候选），用 **SiliconFlow `/v1/rerank`（`BAAI/bge-reranker-v2-m3`）** 重排（query × chunk，服务端、复用嵌入 base/key）。阈值 `RAG_RERANK_THRESHOLD=0.2` + `RAG_TOP_K=5` → 输出自带 cite_ref 的 `list[RagChunk]`。
+  - 未配置 key / 调用失败 → 回退 RRF 序并计 `rerank_degraded`，**跳过阈值截断**（RRF 分数量级 ~1/60，0.2 阈值会全灭）。
 
 **意图路由**：`retrieval_plan.strategy ∈ {structural, factual, auto}`：
 
@@ -290,28 +317,29 @@ metadata = {
 
 | 参数 | 财报默认 | 说明 | 与 ARCH §12 |
 |---|---|---|---|
-| `VECTOR_STORE_PATH` | `<root>/data/vectorstore` | 本地向量库地址 | 同 |
+| `VECTOR_STORE_PATH` | `<root>/data/vectorstore` | 本地向量库地址（**已实现：milvus.db + rag_rel.db**） | 同 |
 | `EMBEDDING_MODEL` | `BAAI/bge-m3` | OpenAI 兼容 `/embeddings` 服务端模型（本地不加载）；`hashing`=测试兜底 | **覆盖**（原 bge-small-zh-v1.5） |
 | `EMBEDDING_API_BASE` / `EMBEDDING_API_KEY` | 空 | 嵌入 API 地址/密钥；二者非空且 `RAG_USE_REAL=true` 才走 API，否则回退 hashing | **新增** |
 | `RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | SiliconFlow `/v1/rerank` 服务端重排（复用嵌入 base/key）；无 key 回退 Noop | **新增** |
 | `RAG_TOP_K` | `5` | 最终返回 chunk 数 | 同 |
-| `RAG_CANDIDATE_K` | `30` | rerank 前候选 chunk 数 | **新增** |
-| `RAG_TOP_K_SECTIONS` | `3` | 聚合后候选节数 | **新增** |
-| `RAG_SCORE_THRESHOLD` | `0.3` | dense 粗筛阈值 | 同 |
-| `RAG_RERANK_THRESHOLD` | `0.3` | rerank 阈值（bge-reranker-v2-m3 对真实 MD&A 分偏低） | **新增** |
-| `RAG_RERANK_CANDIDATES` | `24` | 重排候选池容量（每 top 节取 `24//top_k_sections` 个） | **新增** |
+| `RAG_CANDIDATE_K` | `50` | 每路候选数（recall-first） | **新增** |
+| `RAG_TOP_K_SECTIONS` | `5` | 聚合后候选节数 | **新增** |
+| `RAG_SCORE_THRESHOLD` | `0.3` | dense 粗筛阈值 | 同 🔶 声明但代码未读取 |
+| `RAG_RERANK_THRESHOLD` | `0.2` | rerank 阈值（bge-reranker-v2-m3 对真实 MD&A 分偏低） | **新增** |
+| `RAG_RERANK_CANDIDATES` | `30` | 重排候选池硬上限 | **新增** |
 | `RAG_FIN_DENSE_CHUNK` / `RAG_FIN_DENSE_OVERLAP` | `400` / `80` | dense 小块粒度（bge 512 token） | **覆盖**（ARCH 800/150 偏大易被截断） |
 | `RAG_SECTION_MAX_CHARS` | `8000` | 节文本截断（BM25 用） | **新增** |
 | `RAG_TABLE_ROWS_PER_CHUNK` | `8` | 表格分块行数 | **新增** |
-| `RAG_HYBRID_WEIGHTS` | `dense 0.6 / bm25 0.4` | 或 RRF | **新增** |
+| `RAG_HYBRID_DENSE_WEIGHT` | `0.6` | 🔶 预留：实际三路纯 RRF（`Σ1/(rank+RAG_RRF_K)`），无读取者 | **新增** |
+| `RAG_RRF_K` / `RAG_BM25_K1` / `RAG_BM25_B` | `60` / `1.5` / `0.75` | RRF 的 k 与 BM25 参数 | **新增** |
 | `RAG_STRICT_SCOPE` | `true` | company+year 已知即硬过滤 | **新增** |
-| `RAG_HYDE` | `false` | 假设文档增强 | **新增** |
-| `RAG_STRATEGY` | `auto` | structural / factual / auto（当前全量三路检索，strategy 为前瞻权重字段） | **新增** |
+| `RAG_HYDE` | `false` | 假设文档增强（未启用分支） | **新增** |
+| `RAG_STRATEGY` | `auto` | structural / factual / auto（意图映射：report→factual、compare→structural） | **新增** |
 | `RAG_TABLE_ENGINE` | `pymupdf` | 表格引擎（pymupdf/camelot） | **新增** |
 | `RAG_CAPTIONER` | `deepseek-v4-flash-vision-exp` | 多模态图块描述模型（需 `DS_API_KEY`，无 key 回退 Noop 跳图块） | **新增** |
-| `RAG_RETRY_MAX` | `2` | 合理性判断回环上限 | 同 |
+| `RAG_CORPUS_DIR` / `RAG_HTTP_URL`(+) | `""` | 🔶 后加：显式设置才摄取；RAG_HTTP_URL 非空 → 进程走 HttpRetriever | **后加** |
 
-> `RAG_FIN_DENSE_CHUNK=400` 是**结合 real 向量模型窗口与 400 字留余量**的理性选择；ARCH 的 `RAG_CHUNK_SIZE=800/150` 保留为通用值，财报场景用专用值覆盖。`RAG_EMBEDDING_MODEL=hashing` 仅作离线/测试兜底（不装真实向量模型时）。
+> 数值以 `demomcp/config/settings.py` 与 `.env.example` 为唯一事实源（本表已按 2026-08-27 代码对齐）。`RAG_FIN_DENSE_CHUNK=400` 是**结合 real 向量模型窗口与 400 字留余量**的理性选择；`RAG_EMBEDDING_MODEL=hashing` 仅作离线/测试兜底。`RAG_RETRY_MAX`（原§5.7）不存在于 settings，已删除。
 
 ---
 
@@ -400,19 +428,20 @@ class Citation(BaseModel):        # 扩展 ARCH §11.1，全部为可选新增�
 
 | 依赖 | 用途 | 备注 |
 |---|---|---|
+| `pymilvus` + `milvus-lite` | **向量库（实际实现）** | 真实后端；单进程独占锁，多进程需走 HTTP |
 | `pymupdf` | PDF 原生 block / 表格 / 图块提取 | 真实后端；纯核心管线不依赖 |
-| `rank-bm25` | 混合检索 BM25 | 纯 Python，轻量 |
+| `rank-bm25` | 混合检索 BM25 | 纯 Python，轻量（实际实现含自包含 BM25：`rag/bm25.py` + `persist.py` RelStore 持久化状态） |
 | `jieba` | 中文分词（BM25 键词 + 术语表） | 纯 Python |
-| `camelot-py` | （可选）高保真表格 | **需系统 Ghostscript**，默认不装；`RAG_TABLE_ENGINE=camelot` 时启用 |
+| `camelot-py` | （可选）高保真表格 | **需系统 Ghostscript**，默认不装；`RAG_TABLE_ENGINE=camelot` 时启用（未入 pyproject） |
 
-> **嵌入不做本地加载**：`BAAI/bge-m3` 以 OpenAI 兼容 `/embeddings` API 调用（`RAG_EMBEDDING_API_BASE` + `RAG_EMBEDDING_API_KEY`，服务端跑模型）；因此**无需** `sentence-transformers`/`faiss-cpu`/`torch`，本地只保留轻量依赖。真实后端接入零模型下载。
+> **嵌入不做本地加载**：`BAAI/bge-m3` 以 OpenAI 兼容 `/embeddings` API 调用（`RAG_EMBEDDING_API_BASE` + `RAG_EMBEDDING_API_KEY`，服务端跑模型）；因此**无需** `sentence-transformers`/`faiss-cpu`/`torch`，本地只保留轻量依赖。真实后端接入零模型下载。**注意**：向量存储实际是 **Milvus-Lite**（本文稿早期曾提 Chroma/FAISS 候选 —— 未采用）。
 
 > 核心管线默认纯 Python（HashingEmbedder + InMemoryVectorStore + 自包含 BM25 + NoopReranker + NoopCaptioner），**无需任何新依赖即可离线跑通**。真实嵌入走 OpenAI 兼容 `/embeddings` API（服务端 bge-m3），本地不加载 torch/模型。与 `mcp>=1.28,<2`、`pydantic>=2`、`openai>=1` 无冲突。`camelot-py` 因系统依赖**不建议进容器默认镜像**。
 
 ### 7.3 新增配置（`demomcp/config/settings.py` + `.env.example`）
 
 - 沿用 ARCH §13.3：`VECTOR_STORE_PATH / EMBEDDING_MODEL / RAG_TOP_K / RAG_SCORE_THRESHOLD / RAG_RETRY_MAX`。
-- 新增/覆盖（见 §5.7 参数表）：`RERANK_MODEL`、`RAG_CANDIDATE_K`、`RAG_TOP_K_SECTIONS`、`RAG_RERANK_THRESHOLD`、`RAG_RERANK_CANDIDATES`（重排候选池）、`RAG_FIN_DENSE_CHUNK`、`RAG_FIN_DENSE_OVERLAP`、`RAG_SECTION_MAX_CHARS`、`RAG_TABLE_ROWS_PER_CHUNK`、`RAG_HYBRID_WEIGHTS`、`RAG_STRICT_SCOPE`、`RAG_HYDE`、`RAG_STRATEGY`、`RAG_TABLE_ENGINE`、`RAG_CAPTIONER`、`RAG_USE_REAL`、`RAG_EMBEDDING_DIM`、`RAG_RRF_K`、`RAG_BM25_K1`、`RAG_BM25_B`。
+- 新增/覆盖（见 §5.7 参数表）：`RERANK_MODEL`、`RAG_CANDIDATE_K`、`RAG_TOP_K_SECTIONS`、`RAG_RERANK_THRESHOLD`、`RAG_RERANK_CANDIDATES`（重排候选池）、`RAG_FIN_DENSE_CHUNK`、`RAG_FIN_DENSE_OVERLAP`、`RAG_SECTION_MAX_CHARS`、`RAG_TABLE_ROWS_PER_CHUNK`、`RAG_HYBRID_DENSE_WEIGHT`（预留）、`RAG_STRICT_SCOPE`、`RAG_HYDE`、`RAG_STRATEGY`、`RAG_TABLE_ENGINE`、`RAG_CAPTIONER`、`RAG_USE_REAL`、`RAG_EMBEDDING_DIM`、`RAG_RRF_K`、`RAG_BM25_K1`、`RAG_BM25_B`、`RAG_CORPUS_DIR`、`RAG_HTTP_URL`/`RAG_HTTP_TIMEOUT`/`RAG_HTTP_TOKEN`（后加）。
 
 ### 7.4 需扩展的既有契约
 
@@ -483,10 +512,10 @@ query 含「比亚迪」时，top-k 不得出现宁德时代块（或已被 `RAG
 ### 10.2 示例数据流（「比亚迪 2024 研发费用率」）
 
 1. **`rewrite_query`**：`rewritten_query = "比亚迪 2024 年研发费用率"`；`retrieval_plan = {tools: [...], concepts: ["研发费用率", "研发投入", "营业收入"], filters: {company: "比亚迪", year: 2024}, strategy: "auto"}`。
-2. **`rag_retrieve`**：`query_build` 用 jieba + 术语表补充键词 → Stage 1：company+year 过滤后，chunk 索引（dense）与 section 索引（BM25）并行 top-30，RRF 融合 → Stage 2：候选按 `section_path` 聚合出候选节（RAG_TOP_K_SECTIONS=3）→ `bge-reranker-base` 重排 → 返回 `RagChunk[]`（如 `[比亚迪2024年报 - 第46页 3.2 研发投入 · 表 12 研发投入情况]`、`... 第42页 3.1 营业收入` 等），每块自带 cite_ref。
-3. **`integrate`**：与 `call_tools` 的结构化数据（若有）归一化为 `Evidence`，形成 `claims`（「2024 年研发费用率 = 研发投入 / 营业收入 ≈ X%」），挂 `citations`。
-4. **`verify_reasonableness`**：核对单位/年份一致 → 通过。
-5. **`structure_output`**：输出 `StructuredAnswer`——`answer`（中文总结）+ `claims`（带证据）+ `citations`（内联标记 + reflist）+ `is_reliable=true`。
+2. **`rag_retrieve`**：`query_build` 用 jieba + 术语表补充键词 → Stage 1：company+year 过滤后，chunk 索引（dense）与 section 索引（BM25）并行 top-50，RRF 融合 → Stage 2：候选按 `(doc_id, section_path)` 聚合出候选节（RAG_TOP_K_SECTIONS=5）→ SiliconFlow `/v1/rerank`（`bge-reranker-v2-m3`）重排（失败回退 RRF 序并跳过阈值）→ 返回 `RagChunk[]`（如 `[比亚迪2024年报 - 第46页 3.2 研发投入 · 表 12 研发投入情况]`、`... 第42页 3.1 营业收入` 等），每块自带 cite_ref。
+3. **`integrate`**：与 `call_tools` 的结构化数据（若有）归一化为 Evidence，形成 claims（「2024 年研发费用率 = 研发投入 / 营业收入 ≈ X%」），挂 citations。（已实现：`tool_rag` 并行 + 证据合并，见 `RAG_INTEGRATION.md` §3。）
+4. **`verify_reasonableness`**：核对单位/年份一致 → 通过。**（❌ 未实现：当前 synthesizer 一次性流式生成，无自检回环；合成失败转 fallback。）**
+5. **`structure_output`**：输出 `StructuredAnswer`——`answer`（中文总结）+ `claims`（带证据）+ `citations`（内联标记 + reflist）+ `is_reliable=true`。（已实现为 `structured: dict`：answer/intent/strategy/sources/citations/claims/metadata。）
 
 ### 10.3 引用样例
 
