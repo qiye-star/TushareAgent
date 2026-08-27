@@ -23,7 +23,6 @@ demo-mcp 是一个 **LLM + MCP** 数据对话助手：用自然语言提问，�
 | [RAG_INTEGRATION.md](docs/RAG_INTEGRATION.md) | **RAG 集成与运行（当前实现）**：检索计划构造、三路 RRF、重排与阈值、证据组装、Milvus-Lite+SQLite 持久化、`/api/rag/retrieve` HTTP 服务、RAG_* 全量默认值表与三个验证脚本（`eval_rag`/`validate_rag`/`dba_rag`） | 修改/调试 RAG 的开发者 |
 | [RAG_FINANCE.md](docs/RAG_FINANCE.md) | **RAG 设计蓝图**（含「实现状态（截至 2026-08-27）」核对表）：**为什么**混合检索、如何保证引用不编造、评估门禁标准；含未来项（hyDE、质量自检回环等） | 想改检索算法/评估的开发者 |
 | [tool-call-layer.md](docs/tool-call-layer.md) | **语义工具层设计**（已按设计实现）：双票限定、4 个语义工具、参数归一化、is_error 错误语义、JSON 输出契约 | 扩展工具层的开发者 |
-| [UPLOAD_GUIDE.md](docs/UPLOAD_GUIDE.md) | **一键上传云服务器**：`scripts/sync_deploy.ps1` 的 `-Setup`/`-Mirror`/`-DryRun`/`-Check` 模式与排障（rclone + SSH 密钥） | 部署/运维 |
 | [TEST_REPORT.md](docs/TEST_REPORT.md) | **测试报告（2026-08-27，3 次测试 + 量化评分卡）**：pytest 169 项全量、RAG 离线评估 5 项指标、真引擎验证（达标：BYD/CATL recall 1.00、隔离 ✅；余留：表格溯源 0/2）、真实端到端冒烟（数值与官方 MCP 直查一致）、**总评分 89.4/100** | 关注质量门禁的历史记录 |
 
 > `docs/` 目录内另有 3 份年报 PDF（语料样本，**非文档**）。
@@ -37,7 +36,7 @@ demo-mcp/
 ├── .env / .env.example     项目配置
 ├── Dockerfile / docker-compose.yml   容器化部署
 ├── mcp_server/             内置 MCP 数据服务器（把 Tushare 数据代理暴露成 tools；默认停用）
-├── docs/                   文档：ARCHITECTURE（现状架构）/ RAG_INTEGRATION（RAG 现状）/ RAG_FINANCE（设计蓝图）/ tool-call-layer / UPLOAD_GUIDE
+├── docs/                   文档：ARCHITECTURE（现状架构）/ RAG_INTEGRATION（RAG 现状）/ RAG_FINANCE（设计蓝图）/ tool-call-layer
 ├── demomcp/
 │   ├── interfaces/   契约层：类型 + ToolProvider / LLMClient 两协议（纯契约）
 │   ├── agents/       薄壳：Agent（构图 + ainvoke + 归一化 AgentResult）
@@ -48,7 +47,7 @@ demo-mcp/
 │   ├── config/       配置层：Settings + 项目根 + MCP URL + 语义工具/RAG 配置
 │   └── entry/        入口层：CLI / Web（SSE 流式 + REST + RAG HTTP 端点）
 ├── tests/            离线 gate（FakeToolProvider + MockLLM + 内存 SQLite；RAG/语义工具单测）
-├── scripts/          smoke_e2e.py（真实端到端）/ eval_rag.py（RAG 离线评估）/ validate_rag.py（真引擎验证）/ dba_rag.py（离线建索引）/ sync_deploy.ps1（+sync.cmd 云服务器上传）
+├── scripts/          smoke_e2e.py（真实端到端）/ eval_rag.py（RAG 离线评估）/ validate_rag.py（真引擎验证）/ dba_rag.py（离线建索引）
 └── scripts/web/      React + TS + Tailwind 前端（Vite + Zustand；三栏工作台：会话 / 对话 / 配置面板）
 ```
 

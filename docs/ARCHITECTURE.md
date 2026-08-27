@@ -16,7 +16,6 @@
 | `RAG_INTEGRATION.md` | 当前实现 | RAG 集成与运行：检索计划、RRF、持久化、HTTP 服务、全量配置表 |
 | `RAG_FINANCE.md` | 设计蓝图 | RAG 动机与评估标准（含「实现状态」核对表） |
 | `tool-call-layer.md` | 设计→已实现 | 语义工具层设计（双票限定、4 工具） |
-| `UPLOAD_GUIDE.md` | 运维手册 | 一键上传云服务器（rclone + SSH 密钥） |
 | `TEST_REPORT.md` | 测试记录 | 2026-08-27 完整测试（3 次 + 量化评分卡 89.4/100）：pytest 169 项、RAG 离线/真引擎指标、E2E |
 
 ## 2. 分层架构
@@ -304,7 +303,6 @@ flowchart LR
 | `scripts/eval_rag.py` | RAG 离线评估（默认合成语料；`--corpus` 真实 PDF；门禁见 RAG_INTEGRATION §8） |
 | `scripts/validate_rag.py` | 真引擎（bge-m3 + reranker）对两份真实年报的验证门禁 |
 | `scripts/dba_rag.py` | 离线批量建索引（`--corpus`/`--rebuild`/`--hashing`） |
-| `scripts/sync_deploy.ps1`（+`sync.cmd`） | rclone SFTP 一键上传云服务器（见 `UPLOAD_GUIDE.md`） |
 
 ## 13. 未实现 / 预留 / 遗留（如实清单）
 
