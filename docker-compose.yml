@@ -12,7 +12,9 @@ services:
       # 会话历史用 SQLite，且放进 volume 便于持久化
       DEMO_DATABASE_URL: sqlite+aiosqlite:////app/data/demo.db
     volumes:
-      - demo_data:/app/data
+      - demo_data:/app/data                      # 会话 demo.db（保留）
+      - ./data/vectorstore:/app/data/vectorstore  # 共享本地已建好的 RAG 索引（has_index→load_index 快载，不重灌）
+      - ./docs:/app/docs                          # 语料（RAG_CORPUS_DIR=docs 可解析；索引未命中时也可 ingest）
     restart: unless-stopped
 
 volumes:

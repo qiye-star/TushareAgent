@@ -6,9 +6,7 @@ __pycache__/
 .ruff_cache/
 dist/
 demo.db
-# 注意：RAG 预建索引 data/vectorstore/（milvus.db + rag_rel.db + _shm/_wal）要打进镜像 bake 给容器种子，
-# 故不能再用 *.db 全排除；只排除运行时会话库 demo.db。
-# data/_validate_tmp*/
+*.db
 
 # Node — 前端源码的依赖与产物在容器内重新生成
 scripts/web/node_modules/
