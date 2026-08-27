@@ -283,7 +283,19 @@ def make_tool_rag(
         await _emit_process(config, "plan", {"tools": [tu.name for tu in resp.tool_uses]})
         rag_coro = _rag_retrieve(retriever, state, intent, config) if (retriever is not None and _should_rag(intent)) else _empty_rag()
         tool_coros = [_safe_call_tool(tools, tu.name, tu.input) for tu in resp.tool_uses]
-        gathered = await asyncio.gather(rag_coro, *tool_coros)
+        try:
+            gathered = await asyncio.gather(rag_coro, *tool_coros)
+        except Exception:  # noqa: BLE001 - 并行一路（非取消）异常 → 视为无进展走 fallback，不崩图；取消仍透传
+            return {
+                "messages": messages,
+                "tool_results": [],
+                "evidence": [],
+                "rag_chunks": [],
+                "fallback_reason": "parallel_race",
+                "usage": usage,
+                "validation_errors": validation_errors,
+                "request_params": request_params,
+            }
         rag_evidence, raw_chunks = gathered[0]
         rag_chunks: list[Any] = list(state.get("rag_chunks") or [])
         if raw_chunks:

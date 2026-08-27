@@ -30,7 +30,7 @@ $REMOTE  = '/www/wwwroot/TushareAgent'              # 前导 / 表示绝对路�
 # 可选排除集合（默认为空 = 字面全量）。嫌 .venv/node_modules 太大时，把 $UseExcludes 改成 $true。
 $UseExcludes = $false
 $Excludes = @(
-    '.venv/**', 'web/node_modules/**', 'web/dist/**', '.git/**',
+    '.venv/**', 'scripts/web/node_modules/**', 'scripts/web/dist/**', '.git/**',
     '__pycache__/**', '.pytest_cache/**', '.ruff_cache/**',
     '*.egg-info/**', 'demo.db', '*.log'
 )

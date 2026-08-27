@@ -90,7 +90,7 @@ flowchart TB
   - SSE 事件：`text` / `thinking` / `tool_call{name,input}` / `tool_result{content,ok}` / `process{kind,data}` / `done{stopped_reason,session_id,usage,structured}` / `error`，末尾 `__end__` 哨兵。
   - 落库三连：`append`（每消息）+ `append_turn`（整轮消息 JSON）+ `append_turn_data`（UI payload：query/thinking/steps/answer/sources/citations/claims/metadata/intent/strategy/stopped_reason/usage/error）。
 - REST：`GET /api/sessions`、`GET /api/sessions/{id}`、`GET /api/sessions/{id}/turns`、`DELETE /api/sessions/{id}`；RAG 端点 `POST /api/rag/retrieve` 与 `GET /api/rag/health`（见 `RAG_INTEGRATION.md` §6）。
-- 静态：若存在 `web/dist` 则 `StaticFiles(html=True)` 挂载前端构建产物。
+- 静态：若存在 `scripts/web/dist` 则 `StaticFiles(html=True)` 挂载前端构建产物。
 
 ```mermaid
 sequenceDiagram
@@ -293,7 +293,7 @@ flowchart LR
 
 ## 12. 部署与脚本
 
-- **Dockerfile** 两阶段：① `node:20-alpine` `npm ci && npm run build` → `web/dist`；② `python:3.11-slim` + uv 二进制，`uv sync --no-dev`，非 root `app` 用户，EXPOSE 8010，CMD `uvicorn demomcp.entry.web:app --host 0.0.0.0 --port 8010`。
+- **Dockerfile** 两阶段：① `node:20-alpine` `npm ci && npm run build` → `scripts/web/dist`；② `python:3.11-slim` + uv 二进制，`uv sync --no-dev`，非 root `app` 用户，EXPOSE 8010，CMD `uvicorn demomcp.entry.web:app --host 0.0.0.0 --port 8010`。
 - **docker-compose**：单服务 `demo`，端口 `8010:8010`，env_file `.env`，卷 `demo_data → /app/data`（demo.db 与 RAG 向量库落此），`restart: unless-stopped`。
 - **无独立 RAG 端口**：`/api/rag/retrieve`、`/api/rag/health` 挂在 web 8010 上（历史的 `rag_server.log` 即 web 自身日志）。
 - **scripts\**：

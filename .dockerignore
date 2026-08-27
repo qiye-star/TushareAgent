@@ -9,9 +9,9 @@ demo.db
 *.db
 
 # Node — 前端源码的依赖与产物在容器内重新生成
-web/node_modules/
-web/dist/
-web/.vite/
+scripts/web/node_modules/
+scripts/web/dist/
+scripts/web/.vite/
 
 # 其它
 .git/

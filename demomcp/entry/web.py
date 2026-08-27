@@ -32,9 +32,9 @@ from demomcp.providers.tools.mcp import mcp_tool_provider
 from demomcp.providers.tools.stocks import StockToolProvider
 from demomcp.rag.schemas import RetrievalPlan
 
-# React 前端构建产物输出到 web/dist（见 web/vite.config.ts 的 build.outDir）。
-# 开发时用 `cd web && npm run dev`（Vite 代理到本服务）；生产由本静态挂载同源服务 dist。
-WEB_DIR = Path(__file__).resolve().parents[2] / "web" / "dist"
+# React 前端构建产物输出到 scripts/web/dist（见 scripts/web/vite.config.ts 的 build.outDir）。
+# 开发时用 `cd scripts/web && npm run dev`（Vite 代理到本服务）；生产由本静态挂载同源服务 dist。
+WEB_DIR = Path(__file__).resolve().parents[2] / "scripts" / "web" / "dist"
 
 
 @asynccontextmanager

@@ -49,7 +49,7 @@ demo-mcp/
 │   └── entry/        入口层：CLI / Web（SSE 流式 + REST + RAG HTTP 端点）
 ├── tests/            离线 gate（FakeToolProvider + MockLLM + 内存 SQLite；RAG/语义工具单测）
 ├── scripts/          smoke_e2e.py（真实端到端）/ eval_rag.py（RAG 离线评估）/ validate_rag.py（真引擎验证）/ dba_rag.py（离线建索引）/ sync_deploy.ps1（+sync.cmd 云服务器上传）
-└── web/              React + TS + Tailwind 前端（Vite + Zustand；三栏工作台：会话 / 对话 / 配置面板）
+└── scripts/web/      React + TS + Tailwind 前端（Vite + Zustand；三栏工作台：会话 / 对话 / 配置面板）
 ```
 
 依赖方向自上而下：`entry → agents → interfaces`；`providers → interfaces`；`config` 为叶子；`db` 被 entry 使用；`rag` 经 `Agent._get_retriever` **注入**图（另有独立脚本/评估入口）。
@@ -77,10 +77,10 @@ cp .env.example .env                       # 填 DS_API_KEY / TUSHARE_MCP_URL（
 # .venv/bin/python -m demomcp.entry.cli              # Linux / macOS
 
 # Web 控制台（SSE 流式；打开 http://127.0.0.1:8010）
-# 前端为 React + TS + Tailwind（Vite 工程，见 web/）；先构建产物再由后端同源服务
-cd web && npm ci && npm run build && cd ..
+# 前端为 React + TS + Tailwind（Vite 工程，见 scripts/web/）；先构建产物再由后端同源服务
+cd scripts/web && npm ci && npm run build && cd ../..
 .venv/Scripts/python.exe -m uvicorn demomcp.entry.web:app --port 8010
-# 开发模式：另开终端 `cd web && npm run dev`（Vite 代理 /chat、/api 到 8010）
+# 开发模式：另开终端 `cd scripts/web && npm run dev`（Vite 代理 /chat、/api 到 8010）
 ```
 
 示例会话：`比亚迪最近一个月的日线` / `宁德时代近两年的研发投入` —— 助手直接调用对应语义工具取数（并**并行检索**年报 RAG），最后总结输出（含内联引用），并把每轮消息、完整上下文与结构化 UI 数据落到 `demo.db`（可用侧栏查看/恢复）。语义工具层只放行比亚迪/宁德时代两只标的。
@@ -113,9 +113,9 @@ cp .env.example .env        # 填 DS_API_KEY / TUSHARE_MCP_URL（含 token）等
 docker compose up           # 一键：构建(两阶段) + 启动 Web，打开 http://localhost:8010
 ```
 
-- **构建（两阶段）**：`node:20-alpine` 先出 `web/dist` 静态资源 → `python:3.11-slim` 装 `uv` 运行时，`uv run uvicorn demomcp.entry.web:app`（`0.0.0.0:8010`）。`web.py` 直接托管 `web/dist`。
+- **构建（两阶段）**：`node:20-alpine` 先出 `scripts/web/dist` 静态资源 → `python:3.11-slim` 装 `uv` 运行时，`uv run uvicorn demomcp.entry.web:app`（`0.0.0.0:8010`）。`web.py` 直接托管 `scripts/web/dist`。
 - `.env` 经 `env_file` 注入；会话历史用 SQLite，写进卷 `demo_data`（容器内 `/app/data`），`demo.db` 与 RAG `data/vectorstore/` 同卷持久化。
-- `.dockerignore` 已排除 `.env / .venv / web/dist / demo.db / *.db / docs`，构建上下文干净。
+- `.dockerignore` 已排除 `.env / .venv / scripts/web/dist / demo.db / *.db / docs`，构建上下文干净。
 
 不走 compose、单独跑：
 

@@ -7,14 +7,28 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
+from demomcp.config.logging import get_logger
 from demomcp.config.settings import Settings
 from demomcp.graph.builder import build_research_graph
 from demomcp.graph.state import GraphState
 from demomcp.interfaces.llm_client import LLMClient
 from demomcp.interfaces.tool_provider import ToolProvider
 from demomcp.interfaces.types import AgentResult
+
+_log = get_logger("agents")
+
+
+def _flatten_exceptions(err: BaseException) -> list[BaseException]:
+    """把（可能嵌套的）ExceptionGroup/BaseExceptionGroup 拍平成叶子异常，便于取真实原因/判断取消。"""
+    if isinstance(err, BaseExceptionGroup):
+        out: list[BaseException] = []
+        for e in err.exceptions:
+            out.extend(_flatten_exceptions(e))
+        return out
+    return [err]
 
 
 class Agent:
@@ -67,6 +81,24 @@ class Agent:
             )
         return self._graph
 
+    def _error_result(self, messages: list[dict[str, Any]], cause: BaseException) -> AgentResult:
+        self._log_error(cause)
+        return AgentResult(
+            final_text=f"处理失败：{cause}。请稍后重试。\n\n{self._config.disclaimer}",
+            stopped_reason="error",
+            messages=messages,
+            tool_results=[],
+            usage=None,
+        )
+
+    @staticmethod
+    def _log_error(cause: BaseException) -> None:
+        _log.error(
+            "agent.run failed: %s",
+            type(cause).__name__,
+            exc_info=(type(cause), cause, cause.__traceback__),
+        )
+
     async def run(
         self,
         user_input: str,
@@ -95,14 +127,16 @@ class Agent:
                 state,
                 config={"configurable": {"on_text": on_text, "on_thinking": on_thinking, "on_tool": on_tool, "on_process": on_process}},
             )
-        except Exception as exc:  # noqa: BLE001 - 图异常（含 ExceptionGroup）归一为优雅结果；不捕 BaseException(取消)
-            return AgentResult(
-                final_text=f"处理失败：{type(exc).__name__}。请稍后重试。\n\n{self._config.disclaimer}",
-                stopped_reason="error",
-                messages=messages,
-                tool_results=[],
-                usage=None,
-            )
+        except asyncio.CancelledError:
+            raise  # 客户端断连/取消：透传（BaseException），不误报“处理失败”
+        except BaseExceptionGroup as eg:  # 取消组透传，真异常组归一为优雅结果
+            leaves = _flatten_exceptions(eg)
+            cancel = [e for e in leaves if isinstance(e, asyncio.CancelledError)]
+            if cancel:
+                raise cancel[0]
+            return self._error_result(messages, leaves[-1] if leaves else eg)
+        except Exception as exc:  # noqa: BLE001 - 图普通异常归一为优雅结果
+            return self._error_result(messages, exc)
         return AgentResult(
             final_text=result.get("final_answer") or "",
             stopped_reason=result.get("stopped_reason") or "end_turn",

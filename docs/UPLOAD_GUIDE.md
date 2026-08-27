@@ -41,7 +41,7 @@
 
 ```mermaid
 flowchart LR
-    L["本地 D:/TushareAgent<br/>（源码 + docs/ 全 md + web/dist 构建物）"] -->|"sync_deploy.ps1 / sync.cmd<br/>rclone copy（SFTP + SSH 密钥）<br/>129.204.156.192:39588, root"| R["云服务器 /www/wwwroot/TushareAgent<br/>（宝塔）"]
+    L["本地 D:/TushareAgent<br/>（源码 + docs/ 全 md + scripts/web/dist 构建物）"] -->|"sync_deploy.ps1 / sync.cmd<br/>rclone copy（SFTP + SSH 密钥）<br/>129.204.156.192:39588, root"| R["云服务器 /www/wwwroot/TushareAgent<br/>（宝塔）"]
     R -->|"docker compose up<br/>（Dockerfile 两阶段，含前端构建）"| W["web :8010<br/>uvicorn demomcp.entry.web:app<br/>+ RAG /api/rag/* + 卷 demo_data"]
 ```
 
@@ -51,7 +51,7 @@ flowchart LR
 .\scripts\sync_deploy.ps1
 ```
 
-> 上线前先跑一次 `.\scripts\sync_deploy.ps1 -DryRun` 核对清单：`docs\` 下 5 个 md 与 `web\dist\` 构建物应在传输列表内（见 §六 2、3）。
+> 上线前先跑一次 `.\scripts\sync_deploy.ps1 -DryRun` 核对清单：`docs\` 下 5 个 md 与 `scripts\web\dist\` 构建物应在传输列表内（见 §六 2、3）。
 
 默认即 `rclone copy`（**只增不删**），只上传/覆盖本地有而服务器缺失或已变更的文件，重复跑很快（增量）。完成后打印 `Transferred:` 统计。全程免密。
 
@@ -74,7 +74,7 @@ flowchart LR
 | `$LOCAL` | `D:\TushareAgent` | 本地源码目录 |
 | `$REMOTE` | `/www/wwwroot/TushareAgent` | 远端绝对路径（前导 `/` 表绝对） |
 | `$UseExcludes` | `$false` | `$true` 时启用排除集合（默认全量） |
-| `$Excludes` | `.venv/**`、`web/node_modules/**`、`web/dist/**`、`.git/**`、`__pycache__/**`、`.pytest_cache/**`、`.ruff_cache/**`、`*.egg-info/**`、`demo.db`、`*.log` | 排除项（与脚本逐字核对） |
+| `$Excludes` | `.venv/**`、`scripts/web/node_modules/**`、`scripts/web/dist/**`、`.git/**`、`__pycache__/**`、`.pytest_cache/**`、`.ruff_cache/**`、`*.egg-info/**`、`demo.db`、`*.log` | 排除项（与脚本逐字核对） |
 
 ## 六、注意事项 🔥
 

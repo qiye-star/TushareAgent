@@ -2,14 +2,14 @@
 # 构建上下文只含 demo-mcp/（零外部路径）。应用经 TUSHARE_MCP_URL 连接 Tushare 官方 MCP；
 # 内置 mcp_server/（本地代理→每接口工具）默认停用，仅作后备。
 
-# ---------- 阶段 1：构建 React 前端（web/dist） ----------
+# ---------- 阶段 1：构建 React 前端（scripts/web/dist） ----------
 FROM node:20-alpine AS webbuild
 WORKDIR /webbuild
 # 先只拷清单以复用依赖缓存
-COPY web/package.json web/package-lock.json ./
+COPY scripts/web/package.json scripts/web/package-lock.json ./
 RUN npm ci
-COPY web/vite.config.ts web/tsconfig.json web/index.html ./
-COPY web/src ./src
+COPY scripts/web/vite.config.ts scripts/web/tsconfig.json scripts/web/index.html ./
+COPY scripts/web/src ./src
 RUN npm run build
 
 # ---------- 阶段 2：Python 运行时 ----------
@@ -27,12 +27,14 @@ COPY pyproject.toml uv.lock ./
 COPY mcp_server/ ./mcp_server/
 COPY demomcp/ ./demomcp/
 COPY scripts/ ./scripts/
-# 前端构建产物（web.py 静态挂载 web/dist）
-COPY --from=webbuild /webbuild/dist ./web/dist
+# 前端构建产物（web.py 静态挂载 scripts/web/dist）
+COPY --from=webbuild /webbuild/dist ./scripts/web/dist
 
 # 安装运行时依赖（不带 dev 工具）
 RUN uv sync --no-dev && \
     useradd -m -u 1000 app && chown -R app:app /app
+# 预留数据目录并归 app：卷挂载 /app/data 后仍可写（demo.db / RAG 向量库 / 日志均落 /app）
+RUN mkdir -p /app/data && chown app:app /app/data
 USER app
 
 EXPOSE 8010
