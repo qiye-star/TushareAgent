@@ -4,16 +4,13 @@ import { useChatStore } from '@/state/useChatStore'
 import { cn } from '@/lib/cn'
 import { Button } from '@/components/ui/Button'
 import { IconButton } from '@/components/ui/IconButton'
-import { Switch } from '@/components/ui/Switch'
 import { Tooltip } from '@/components/ui/Tooltip'
 
 export function Composer({ onSubmit }: { onSubmit: (query: string) => void }) {
   const [text, setText] = useState('')
   const [fileName, setFileName] = useState<string | null>(null)
   const isStreaming = useChatStore((s) => s.isStreaming)
-  const deepThink = useChatStore((s) => s.deepThink)
   const stop = useChatStore((s) => s.stop)
-  const setDeepThink = useChatStore((s) => s.setDeepThink)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
@@ -81,13 +78,6 @@ export function Composer({ onSubmit }: { onSubmit: (query: string) => void }) {
                 <Paperclip size={17} />
               </IconButton>
             </Tooltip>
-
-            <Switch
-              className="ml-1"
-              checked={deepThink}
-              onCheckedChange={setDeepThink}
-              label="深度思考"
-            />
 
             <div className="ml-auto flex items-center gap-2">
               {isStreaming ? (

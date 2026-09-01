@@ -15,10 +15,8 @@ type ChatState = {
   sessionId: string | null
   turns: ChatTurn[]
   isStreaming: boolean
-  deepThink: boolean
   controller: AbortController | null
 
-  setDeepThink: (v: boolean) => void
   setSessionId: (id: string) => void
 
   /** Begin a turn and stream a message; resolves with the session id used. */
@@ -131,10 +129,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     sessionId: null,
     turns: [],
     isStreaming: false,
-    deepThink: false,
     controller: null,
-
-    setDeepThink: (v) => set({ deepThink: v }),
 
     setSessionId: (id) => set({ sessionId: id }),
 
@@ -173,7 +168,6 @@ export const useChatStore = create<ChatState>((set, get) => {
           {
             message: query,
             session_id: baseSession,
-            model: get().deepThink ? 'deepseek-reasoner' : null,
           },
           (evt) => applyEvent(turnId, evt),
           controller.signal,

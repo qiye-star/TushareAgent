@@ -11,6 +11,7 @@ import { TopBar } from '@/components/layout/TopBar'
 import { ConfigPanel } from '@/components/layout/ConfigPanel'
 import { MessageList } from '@/components/chat/MessageList'
 import { Composer } from '@/components/chat/Composer'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { GearSix } from '@phosphor-icons/react'
 
 export default function App() {
@@ -29,6 +30,7 @@ export default function App() {
   const [activeId, setActiveId] = useState<string | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [configOpen, setConfigOpen] = useState(false)
+  const [pendingAction, setPendingAction] = useState<'reset' | 'clear' | null>(null)
 
   const lastTurn = turns[turns.length - 1]
 
@@ -150,8 +152,8 @@ export default function App() {
               theme={theme}
               onToggleTheme={toggleTheme}
               onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
-              onReset={handleNew}
-              onClearContext={() => void handleClearContext()}
+              onReset={() => setPendingAction('reset')}
+              onClearContext={() => setPendingAction('clear')}
             />
             <MessageList onRegenerate={(q) => void handleRegenerate(q)} />
             <Composer onSubmit={(q) => void handleSend(q)} />
@@ -169,6 +171,24 @@ export default function App() {
             </div>
           </>
         }
+      />
+
+      <ConfirmDialog
+        open={pendingAction !== null}
+        onOpenChange={() => setPendingAction(null)}
+        title={pendingAction === 'clear' ? '清空当前会话？' : '重启会话？'}
+        description={
+          pendingAction === 'clear'
+            ? '将删除当前会话及其全部对话记录，此操作不可撤销。'
+            : '将清除当前对话视图并开始一个新会话（历史会话仍保留在侧栏）。'
+        }
+        confirmLabel={pendingAction === 'clear' ? '清空' : '重启'}
+        danger={pendingAction === 'clear'}
+        onConfirm={() => {
+          if (pendingAction === 'reset') handleNew()
+          else if (pendingAction === 'clear') void handleClearContext()
+          setPendingAction(null)
+        }}
       />
     </TooltipProvider>
   )

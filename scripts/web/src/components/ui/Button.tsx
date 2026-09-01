@@ -15,6 +15,8 @@ const button = cva(
           'rounded-lg text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800',
         outline:
           'rounded-lg border border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-transparent dark:text-zinc-200 dark:hover:bg-zinc-800',
+        danger:
+          'rounded-lg bg-rose-600 text-white hover:bg-rose-500 active:scale-[0.98]',
       },
       size: {
         sm: 'h-8 px-3 text-xs',

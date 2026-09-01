@@ -121,3 +121,13 @@
 .funnel-stage {
   animation: funnel-rise 0.35s ease both;
 }
+
+/*
+ * 非层叠规则：覆盖 @tailwindcss/typography 对表格首列 padding-inline-start:0 的冲刷，
+ * 让最左列文字与表格左边框之间保留内边距，不再贴边。放在 @layer 之外，
+ * 作者层叠外规则优先级高于任意 @layer 内的规则（含插件输出）。
+ */
+.answer-table thead th:first-child,
+.answer-table tbody td:first-child {
+  padding-inline-start: 1rem; /* 与其余列 px-4 一致 */
+}

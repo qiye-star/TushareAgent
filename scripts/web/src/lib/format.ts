@@ -91,7 +91,11 @@ export function deriveTitle(content: string | null): string {
 
 export function formatTime(iso: string | null): string {
   if (!iso) return ''
-  const d = new Date(iso)
+  // 后端存的是 SQLite CURRENT_TIMESTAMP（UTC）且序列化时无时区偏移；裸 ISO 串会被 JS
+  // 当作浏览器本地时间解析，导致 UTC 墙钟直接被当成北京时间，偏离一个时区偏移。
+  // 补 Z 以 UTC 解析，再按浏览器时区（北京时间）显示。
+  const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/.test(iso) ? iso : `${iso}Z`
+  const d = new Date(normalized)
   if (Number.isNaN(d.getTime())) return ''
   return d.toLocaleString('zh-CN', {
     month: '2-digit',
