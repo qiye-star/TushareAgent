@@ -13,12 +13,26 @@ from typing import Any
 from demomcp.config.logging import get_logger
 from demomcp.config.settings import Settings
 from demomcp.graph.builder import build_research_graph
+from demomcp.graph.skills import SKILLS
 from demomcp.graph.state import GraphState
+from demomcp.graph.tool_select import select_tools
 from demomcp.interfaces.llm_client import LLMClient
 from demomcp.interfaces.tool_provider import ToolProvider
-from demomcp.interfaces.types import AgentResult
+from demomcp.interfaces.types import META_TOOL_NAMES, AgentResult
 
 _log = get_logger("agents")
+
+
+def _load_catalog(path: str) -> dict[str, Any] | None:
+    """读工具可用性缓存（TOOL_PROBE_CACHE_PATH）；不存在/损坏 → None（不剔除，行为同今日）。"""
+    try:
+        import json
+
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except Exception:  # noqa: BLE001 - 缓存缺失/损坏只当无剔除
+        return None
 
 
 def _flatten_exceptions(err: BaseException) -> list[BaseException]:
@@ -39,11 +53,36 @@ class Agent:
         self._tool_defs: list[Any] | None = None
         self._graph: Any | None = None
         self._retriever: Any | None = None
+        self._tool_catalog: dict[str, Any] | None = None
 
     async def _get_tool_defs(self) -> list[Any]:
         if self._tool_defs is None:
             self._tool_defs = await self._tools.list_tools()
+            self._tool_catalog = await self._resolve_tool_catalog()
         return self._tool_defs
+
+    async def _resolve_tool_catalog(self) -> dict[str, Any] | None:
+        """工具可用性目录：TOOL_PROBE_ENABLED 时实时探测并写缓存，否则读缓存；无缓存/失败 → None（不剔除）。
+
+        默认关（避免每启动真实调用各接口烧积分、规避官方 MCP 契约未知风险）；开启时全 try/except，失败只回退不剔除。
+        """
+        cfg = self._config
+        path = cfg.tool_probe_cache_path
+        if cfg.tool_probe_enabled:
+            try:
+                from demomcp.providers.tools.curate import (
+                    probe_availability,
+                    save_catalog,
+                )
+
+                catalog = await probe_availability(
+                    self._tools, self._tool_defs, concurrency=cfg.tool_probe_concurrency
+                )
+                save_catalog(catalog, path)
+                return catalog
+            except Exception as exc:  # noqa: BLE001 - 探测失败仅回退读缓存/不剔除
+                print(f"[agent] 工具可用性探测失败，忽略：{exc}")
+        return _load_catalog(path)
 
     async def _get_retriever(self) -> Any | None:
         """懒加载 + 兜底：RAG_HTTP_URL 时用 HTTP 远端检索（该进程不再打开 Milvus）；
@@ -70,14 +109,28 @@ class Agent:
         if self._graph is None:
             tool_defs = await self._get_tool_defs()
             retriever = await self._get_retriever()
+            cfg = self._config
+            meta = META_TOOL_NAMES if cfg.tool_meta_always else frozenset()
+
+            def curate(
+                specs: list[Any], query: str, *, skill_tools: frozenset[str] = frozenset()
+            ) -> list[Any]:
+                return select_tools(
+                    specs, query, max_revealed=cfg.tool_max_revealed, meta=meta,
+                    catalog=self._tool_catalog, skill_tools=skill_tools,
+                )
+
             self._graph = build_research_graph(
                 self._llm,
                 self._tools,
                 tool_defs,
-                max_tokens=self._config.ds_max_tokens,
-                disclaimer=self._config.disclaimer,
-                base_system=self._config.system_prompt,
+                max_tokens=cfg.ds_max_tokens,
+                disclaimer=cfg.disclaimer,
+                base_system=cfg.effective_system_prompt,
                 retriever=retriever,
+                skills=SKILLS,
+                curate=curate,
+                max_iterations=cfg.max_iterations,
             )
         return self._graph
 
@@ -120,12 +173,21 @@ class Agent:
             "citations": [],
             "usage": None,
             "stopped_reason": "end_turn",
+            # agentic tool loop：循环状态初值（RAG 只首次检索、loop 计数 0、尚未决定继续取数、无进展计数 0）
+            "loop_index": 0,
+            "want_more": False,
+            "rag_retrieved": False,
+            "no_progress_count": 0,
         }
         graph = await self._get_graph()
         try:
             result = await graph.ainvoke(
                 state,
-                config={"configurable": {"on_text": on_text, "on_thinking": on_thinking, "on_tool": on_tool, "on_process": on_process}},
+                config={
+                    # 保证我们设定的循环上限先于 LangGraph 默认 recursion_limit（10007）触发
+                    "recursion_limit": self._config.max_iterations + 20,
+                    "configurable": {"on_text": on_text, "on_thinking": on_thinking, "on_tool": on_tool, "on_process": on_process},
+                },
             )
         except asyncio.CancelledError:
             raise  # 客户端断连/取消：透传（BaseException），不误报“处理失败”

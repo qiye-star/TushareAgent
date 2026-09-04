@@ -5,6 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+# 恒保留在 agent 工具面里的「发现/兜底」工具（`query` 是未被揭示接口的逃生通道）。
+META_TOOL_NAMES: frozenset[str] = frozenset({"list_apis", "get_api_info", "query", "stock_basic"})
+
 
 @dataclass
 class ToolSpec:

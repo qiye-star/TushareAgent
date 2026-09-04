@@ -19,6 +19,7 @@ class GraphState(TypedDict, total=False):
 
     # Router 产出
     intent: str | None              # "market" | "report" | "compare"
+    skill: str | None               # 命中的报告 skill id（如 ai_supply_chain_tracker）/ None
     out_of_scope: bool
 
     # Tool/RAG 产出
@@ -28,6 +29,12 @@ class GraphState(TypedDict, total=False):
     rag_chunks: list[Any]                  # RagChunk（来自 retriever.retrieve）
     request_params: dict[str, Any] | None  # 归一化/校验后的实际请求参数（ts_code/日期/复权/期次）
     validation_errors: list[str]           # 工具返回的友好校验失败（first-class）
+
+    # 循环控制（agentic tool loop：tool_rag → tool_rag 条件自环）
+    loop_index: int                  # 已执行的「有工具」轮数（0=尚无工具轮）
+    want_more: bool                  # 上一轮 LLM 是否还要继续取数（tool_uses 非空→True）
+    rag_retrieved: bool              # 本次 agent turn 是否已做过一次 RAG 检索（RAG 只跑一次）
+    no_progress_count: int           # 连续「未产出新证据/新检索」的工具轮数（进展守卫：达上限即止）
 
     # Synthesizer / Fallback 产出
     final_answer: str | None

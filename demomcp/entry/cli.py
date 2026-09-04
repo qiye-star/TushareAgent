@@ -15,7 +15,7 @@ from demomcp.config.logging import configure_logging, get_logger, log_chat_turn
 from demomcp.config.settings import Settings
 from demomcp.db.store import build_store
 from demomcp.providers.llm.deepseek import DeepSeekLLMClient
-from demomcp.providers.tools.mcp import mcp_tool_provider
+from demomcp.providers.tools.wind import agent_tool_provider
 
 logger = get_logger("entry.cli")
 
@@ -40,9 +40,7 @@ async def main() -> int:
         configure_logging(
             settings.log_level, settings.log_file, settings.log_max_bytes, settings.log_backup_count
         )
-        async with mcp_tool_provider(
-            settings.tushare_mcp_url, timeout=settings.mcp_timeout, retries=settings.mcp_retries
-        ) as tools:
+        async with agent_tool_provider(settings) as tools:
             # 直接使用原始 MCP provider：LLM 看到服务端暴露的全部工具（list_apis/get_api_info/query + 各接口工具），可查任意标的任意接口
             agent = Agent(llm=llm, tools=tools, config=settings)
             session_id = uuid.uuid4().hex
@@ -56,6 +54,17 @@ async def main() -> int:
                 sys.stdout.write(f"\n[思考] {text}\n")
                 sys.stdout.flush()
 
+            async def on_process(kind: str, data: dict) -> None:
+                # agentic tool loop：把每一轮取数的状态在 CLI 里透出（continue/stop/max-reached）
+                if kind == "loop_turn":
+                    tools = ",".join(data.get("tools") or [])
+                    sys.stdout.write(
+                        f"\n[取数 第{data.get('round')}轮 · {data.get('status')}]"
+                        + (f" 工具: {tools}" if tools else "")
+                        + "\n"
+                    )
+                    sys.stdout.flush()
+
             print("Tushare 数据助手（DeepSeek + MCP，会话历史已落库）。输入 exit / quit 退出。")
             try:
                 while True:
@@ -67,7 +76,7 @@ async def main() -> int:
                         break
                     print("\nAssistant> ", end="", flush=True)
                     result = await agent.run(
-                        prompt, history=history, on_text=on_text, on_thinking=on_thinking
+                        prompt, history=history, on_text=on_text, on_thinking=on_thinking, on_process=on_process
                     )
                     if not settings.ds_streaming:
                         sys.stdout.write(result.final_text)

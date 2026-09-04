@@ -88,6 +88,15 @@ export type StepKind =
   | 'stage'
   | 'tool_call'
   | 'tool_result'
+  | 'loop_turn'
+
+/** 一轮 agentic tool loop 的快照（tool_rag 条件自环的每一轮）。 */
+export type LoopTurnStepData = {
+  round: number
+  status: 'continue' | 'stop' | 'max-reached'
+  tools: string[]
+  evidence: number
+}
 
 export type Step = {
   kind: StepKind

@@ -1,13 +1,13 @@
 # demo-mcp：可扩展的 LLM+MCP 数据对话助手
 
-demo-mcp 是一个 **LLM + MCP** 数据对话助手：用自然语言提问，内置智能体自动决定调用哪个工具、从 **Tushare 官方 MCP** 取数，并**并行检索 RAG 财报知识库**，最后综合成带**确定性引用**的中文回答——支持 **CLI** 与 **Web 控制台**（流式输出、思考轨迹、工具卡、会话日志与恢复）。核心编排为 **LangGraph 五节点状态机**（router → rewrite_query → tool_rag → synthesizer / fallback，图上无回环）；RAG 财报知识库面向 A 股年报 PDF（离线优先、已对接实时循环、可评估）。
+demo-mcp 是一个 **LLM + MCP** 数据对话助手：用自然语言提问，内置智能体自动决定调用哪个工具、从 **Tushare 官方 MCP** 取数，并**并行检索 RAG 财报知识库**，最后综合成带**确定性引用**的中文回答——支持 **CLI** 与 **Web 控制台**（流式输出、思考轨迹、工具卡、会话日志与恢复）。核心编排为 **LangGraph 状态机**（router → rewrite_query → tool_rag ——（条件自环）→ synthesizer / fallback，`tool_rag` 可**多轮取数**：LLM 每轮基于已见返回判定是否继续，数据足够或达上限才收尾）；RAG 财报知识库面向 A 股年报 PDF（离线优先、已对接实时循环、可评估）。
 
 > ✅ **当前质量状态（2026-08-27 实测）**：pytest **169 项零失败**；RAG 离线门禁全达标（recall@k **1.0** / faithfulness **0.9** / 跨公司隔离 **1.0**）；真引擎 BYD/CATL recall **8/8**、双向隔离 ✅、EXIT 0；E2E 数值与官方 MCP 直查**逐位一致**；**总评分 89.4 / 100**（唯一余留：表格溯源 0/2）— 见 [TEST_REPORT.md](docs/TEST_REPORT.md)。
 
 - **LLM 后端 DeepSeek**（OpenAI 兼容端点，可换）；工具调度、错误处理都在本地。
 - **自带 uv 环境**：`uv sync` 生成项目自己的 `.venv`，独立运行、互不干扰。
-- **LangGraph 五节点编排**：`router`（意图分类 + 越界判断）→ `rewrite_query`（RAG 查询改写）→ `tool_rag`（**并行**：LLM 选工具 + RAG 检索）→ `synthesizer`（综合 + 引用 + 免责声明）／越界或无证据走 `fallback`。图上无回环，一次提问一条路径。
-- **全量 MCP 查询**：应用直接使用原始 `MCPToolProvider`（不叠加语义/白名单层），LLM 看到服务端暴露的全部工具（`list_apis` / `get_api_info` / `query` + 各接口工具如 `daily`/`income`/`stock_basic`），可查**任意 A 股上市公司/指数/任意接口**，不再限定比亚迪/宁德时代。
+- **LangGraph 编排**：`router`（意图分类 + 越界判断）→ `rewrite_query`（RAG 查询改写）→ `tool_rag`（**并行**：LLM 选工具 + RAG 检索）→ `synthesizer`（综合 + 引用 + 免责声明）／越界或无证据走 `fallback`。`tool_rag` 经**条件自环**支持**多轮取数**（agentic tool loop）：每轮执行后 LLM 看返回，仍缺数据就续调、判定足够就停止，最多 `DEMO_MAX_ITERATIONS`（默认 10）轮——一轮一轮是图上真实节点调用，每轮由前端 `process.loop_turn` 事件可视化。
+- **全量 MCP 查询**：应用直接使用原始 `MCPToolProvider`（不叠加语义/白名单层），LLM 看到服务端暴露的工具（`list_apis` / `get_api_info` / `query` + 各接口工具如 `daily`/`income`/`stock_basic`），可查**任意 A 股上市公司/指数/任意接口**，不再限定比亚迪/宁德时代。为防上下文爆满，`tool_rag` 选工具那轮只把**相关子集**喂给 LLM（`graph/tool_select.select_tools`：meta 发现工具恒在 + 金融词汇打分取 top-K，`TOOL_MAX_REVEALED`），执行仍走全量 provider；可用性探测（`scripts/probe_tools.py`，默认关）可选剔除积分/下线接口。
 - **连接 Tushare 官方 MCP**：应用经 `TUSHARE_MCP_URL` 直连 `https://api.tushare.pro/mcp/?token=...`，工具由官方服务器暴露、运行时自动发现（`list_tools`）并打印清单。内置 `mcp_server/`（本地代理→每接口工具）默认停用，仅作后备。
 - **独立 RAG 财报知识库**（`demomcp/rag/`）：把 A 股年报 PDF（如比亚迪/宁德时代）解析 → 章节树 → 分块 → 混合检索（BM25 + 稠密**三路 RRF** 融合）→ 重排 → **确定性引用**（不靠 LLM 编页码）；索引持久化到 `data/vectorstore/`（**Milvus-Lite + SQLite**），可离线评估（`scripts/eval_rag.py`）。
 - **可 Docker 化**：`docker compose up` 一键起 Web 控制台。
@@ -143,7 +143,7 @@ docker run --rm -p 8010:8010 --env-file .env \
 | `DS_STREAMING` | `true` | 是否流式 |
 | `DS_MAX_TOKENS` | `8192` | 单次回复最大 token |
 | `DEMO_SYSTEM_PROMPT` | 内置全量金融 prompt（任意 A 股标的/全量接口，指引 list_apis→get_api_info→query） | 系统提示词 |
-| `DEMO_MAX_ITERATIONS` | `10` | ⚠️ 目前图无循环，此值无读取者（历史遗留） |
+| `DEMO_MAX_ITERATIONS` | `10` | agentic tool loop 取数轮次上限（`tool_rag` 条件自环；LLM 判定数据足够即提前结束） |
 | `DISCLAIMER` | 内置免责声明 | 合成器/兜底文案追加的免责声明 |
 | `DEMO_DATABASE_URL` | 空→`demo.db` | 会话历史库；也支持 `mysql/asyncmy`、`postgres/asyncpg` |
 | `TUSHARE_MCP_URL` | `https://api.tushare.pro/mcp/` | Tushare 官方 MCP 地址（token 放 URL query）；应用经它连接，工具运行时自动发现 |

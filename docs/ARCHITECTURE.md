@@ -209,6 +209,14 @@ flowchart TD
 
 `MCPToolProvider`（`mcp.py`）经 `mcp_tool_provider(url, timeout, retries)` 连接服务端；`list_tools` 自动发现并一次性打印工具清单；`call_tool` 的 `read_timeout_seconds` 是 **`timedelta` 不是秒**。取数结果约定 `{code, msg, row_count, data}`：`code!=0`（权限/积分不足、接口下线）为**业务结果** → 友好 `is_error=False` 让 LLM 转述；真正的传输/异常才 `is_error=True`。重试语义（`DEMO_MCP_RETRIES` 次、退避 `min(0.5*2**attempt, 2.0)`）同时适用异常与业务失败。
 
+### 8.2b 动态工具目录（`graph/tool_select.py` + `providers/tools/curate.py`）
+
+全量工具会撑爆上下文、且大量接口权限/积分用不了，故 `tool_rag` 选工具那轮**只把相关子集喂给 LLM**：
+
+- **相关性过滤（恒开）**：`graph.tool_select.select_tools(specs, query, *, max_revealed=12, meta, catalog)` 在 `tool_rag` 内每次用 `state.original_query` 裁剪 `tool_defs`——恒保留 meta 发现工具（`list_apis`/`get_api_info`/`query`/`stock_basic`，`query` 是没被揭示接口的逃生通道），其余按「工具名/描述与 query 的金融词汇重叠」打分取 top-K（复用 `rag.query_build.extract_concepts`/`FIN_TERMS` + 本地领域词表）；零命中回落仅 meta。**执行仍是全量** `tools.call_tool`（`nodes.py` 的 `_safe_call_tool`），过滤只收窄 LLM 能选的，不破坏调用。
+- **可用性探测（默认关、按需）**：`providers/tools/curate.probe_availability` 逐个接口真实调用一次，按 `code`/`msg` 分桶 `usable`/`blocked`(积分/权限)/`down`(下线) 并缓存到 `TOOL_PROBE_CACHE_PATH`（默认 `data/tool_catalog.json`）；`Agent` 加载缓存后 `select_tools(catalog=...)` 剔除 blocked/down。默认关（`TOOL_PROBE_ENABLED=false`）避免烧积分/规避官方 MCP 契约未知风险；`uv run scripts/probe_tools.py` 可手动跑一次落盘。
+- **配置**：`TOOL_MAX_REVEALED`(12)、`TOOL_META_ALWAYS`(true)、`TOOL_PROBE_ENABLED`(false)、`TOOL_PROBE_CACHE_PATH`、`TOOL_PROBE_CONCURRENCY`(4)。
+
 ### 8.3 llm/deepseek.py（`DeepSeekLLMClient`）
 
 OpenAI 兼容 `AsyncOpenAI`；`chat(stream=True)` 逐 delta：text → `on_text`、`reasoning_content` → `on_thinking`、工具调用按 `tc.index` 分片聚合、usage 任意 chunk 捡起；非流式 `_chat_once` 解析 tool_calls 为 `ToolUse` + 原始 dict；`map_finish`：tool_calls→`tool_use`、length→`max_tokens`、stop/None→`end_turn`。`llm/mock.py` `MockLLM` 弹预置回复并重放回调（测试用）。
@@ -275,7 +283,7 @@ flowchart LR
 | 组 | 变量（默认值） |
 |---|---|
 | LLM | `DS_API_KEY`、`DS_BASE_URL`(api.deepseek.com)、`DS_MODEL`(deepseek-chat)、`DS_STREAMING`(true)、`DS_MAX_TOKENS`(8192) |
-| Agent | `DEMO_SYSTEM_PROMPT`(内置全量金融 prompt：任意 A 股/全量接口 list_apis→get_api_info→query)、`DEMO_MAX_ITERATIONS`(10，**无读取者**)、`DISCLAIMER` |
+| Agent | `DEMO_SYSTEM_PROMPT`(内置全量金融 prompt：任意 A 股/全量接口 list_apis→get_api_info→query)、`DEMO_MAX_ITERATIONS`(10，agentic tool loop 取数轮次上限)、`DISCLAIMER` |
 | DB | `DEMO_DATABASE_URL`(空→`sqlite+aiosqlite:///{PROJECT_ROOT/demo.db}`；也支持 mysql/asyncmy、postgres/asyncpg) |
 | MCP | `TUSHARE_MCP_URL`(api.tushare.pro/mcp/)、`DEMO_MCP_TIMEOUT`(30s)、`DEMO_MCP_RETRIES`(2) |
 | RAG（核心） | `RAG_USE_REAL`(false)、`RAG_VECTOR_STORE_PATH`(root/data/vectorstore)、`RAG_CORPUS_DIR`(空=不自动摄取)、`RAG_HTTP_URL`/`RAG_HTTP_TIMEOUT`(20)/`RAG_HTTP_TOKEN`、`RAG_TOP_K`(5)、`RAG_EMBEDDING_MODEL`(BAAI/bge-m3) |
@@ -299,7 +307,7 @@ flowchart LR
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| 合成器质量自检回环（旧文档 §10 设计） | **未实现** | 图上无回环边；合成失败直接转 fallback 文案 |
+| 合成器质量自检回环（旧文档 §10 设计） | **未实现** | 图上已有 `tool_rag` 的**取数自环**，但「合成器质量自检」回环仍未实现；合成失败直接转 fallback 文案 |
 | `RAG_SCORE_THRESHOLD`（0.3） | **声明但无读取者** | settings 里有默认值与别名，代码从未读 |
 | `GraphState.retrieval_plan` | **死字段** | 声明于 state.py，无节点写入 |
 | `RAG_HYBRID_DENSE_WEIGHT`（0.6） | **预留** | 实际检索为三路纯 RRF 融合，无读取者 |
@@ -323,4 +331,4 @@ router（market）→ rewrite_query（改写但不强制 RAG）→ tool_rag（`_
 
 ### 14.3 旧版已删除的声明（迁移速查）
 
-下列内容在旧版 `ARCHITECTURE.md` 出现过，**当前代码不存在**：四节点拓扑（现为五节点）；`tool_evidences/claims/verification/structured_output/retry_count` State 字段；`add_messages` reducer；手动 agentic loop（`for _ in range(max_iterations)`）；`agents/registry.py CompositeToolProvider`；Chroma/FAISS + `sentence-transformers` 本地嵌入；`RAG_CHUNK_SIZE=800/150`、`SYNTH_MAX_RETRY` 配置；`StructuredAnswer`/`Claim` Pydantic 模型（现为 `structured: dict`）。
+下列内容在旧版 `ARCHITECTURE.md` 出现过，**当前代码不存在**：四节点拓扑（现为五节点，且 `tool_rag` 带**条件自环**，图上可回环）；`tool_evidences/claims/verification/structured_output/retry_count` State 字段；`add_messages` reducer；手动 agentic loop（`for _ in range(max_iterations)`，已被**图上条件自环**取代）；`agents/registry.py CompositeToolProvider`；Chroma/FAISS + `sentence-transformers` 本地嵌入；`RAG_CHUNK_SIZE=800/150`、`SYNTH_MAX_RETRY` 配置；`StructuredAnswer`/`Claim` Pydantic 模型（现为 `structured: dict`）。

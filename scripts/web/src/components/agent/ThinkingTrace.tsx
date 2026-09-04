@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
-import { BracketsCurly, Brain, CaretDown, CircleNotch, PaintBrush, Sliders, Terminal } from '@phosphor-icons/react'
+import { BracketsCurly, Brain, CaretDown, CircleNotch, PaintBrush, Repeat, Sliders, Terminal } from '@phosphor-icons/react'
 import { cn } from '@/lib/cn'
-import { prettyJson, toolLabel } from '@/lib/format'
+import { loopStatusLabel, prettyJson, toolLabel } from '@/lib/format'
 import type { Step } from '@/lib/types'
 import { RetrievalFunnel } from './RetrievalFunnel'
 import { ToolCallCard } from './ToolCallCard'
@@ -9,12 +9,15 @@ import { ToolCallCard } from './ToolCallCard'
 type Group =
   | { type: 'tool'; name: string; input: any; result: any }
   | { type: 'meta'; step: Step }
+  | { type: 'round'; step: Step }
 
 function groupSteps(steps: Step[]): Group[] {
   const out: Group[] = []
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i]
-    if (s.kind === 'tool_call') {
+    if (s.kind === 'loop_turn') {
+      out.push({ type: 'round', step: s })
+    } else if (s.kind === 'tool_call') {
       const next = steps[i + 1]
       const result =
         next && next.kind === 'tool_result' ? { ...next.data } : null
@@ -83,6 +86,33 @@ function MetaRow({ step, streaming }: { step: Step; streaming?: boolean }) {
   )
 }
 
+function RoundRow({ step }: { step: Step }) {
+  const d = step.data ?? {}
+  const status = d.status as string | undefined
+  const label = loopStatusLabel(status)
+  const tools = (d.tools as string[]) ?? []
+  const isStop = status === 'stop'
+  const isMax = status === 'max-reached'
+  const statusCls = isStop ? 'text-emerald-500' : isMax ? 'text-amber-500' : 'text-primary-500'
+  return (
+    <div className="flex items-center gap-2 px-3 py-1.5">
+      <Repeat size={14} className={cn('shrink-0', statusCls)} />
+      <span className="font-medium text-zinc-700 dark:text-zinc-200">{step.label}</span>
+      <span className={cn('text-[12px] font-medium', statusCls)}>{label}</span>
+      {tools.length > 0 && (
+        <span className="truncate text-[12px] text-zinc-400 dark:text-zinc-500">
+          调用：{tools.map(toolLabel).join('、')}
+        </span>
+      )}
+      {isMax && (
+        <span className="rounded-full bg-amber-100 px-1.5 text-[10px] font-medium text-amber-600 dark:bg-amber-500/20 dark:text-amber-400">
+          已达最大轮次
+        </span>
+      )}
+    </div>
+  )
+}
+
 function paramsPreview(input: unknown): string {
   if (!input || typeof input !== 'object') return ''
   const s = Object.entries(input as Record<string, unknown>)
@@ -112,12 +142,19 @@ function stepDetail(step: Step): string {
       return '请求参数'
     case 'stage':
       return `阶段 · ${d.stage ?? ''}`
+    case 'loop_turn': {
+      const tools = d.tools ?? []
+      const status = loopStatusLabel(d.status)
+      const toolTxt = tools.length ? ` · ${tools.map(toolLabel).join('、')}` : ''
+      return `${status}${toolTxt} · 证据 ${d.evidence ?? 0}`
+    }
     default:
       return ''
   }
 }
 
 function FeedLine({ g }: { g: Group }) {
+  if (g.type === 'round') return <RoundRow step={g.step} />
   if (g.type === 'tool') {
     const params = paramsPreview(g.input)
     return (
@@ -244,13 +281,11 @@ export function ThinkingTrace({
             </div>
           )}
           <div className="space-y-2 px-3 py-3">
-            {groups.map((g, i) =>
-              g.type === 'tool' ? (
-                <ToolCallCard key={i} name={g.name} input={g.input} result={g.result} />
-              ) : (
-                <MetaRow key={i} step={g.step} streaming={streaming} />
-              ),
-            )}
+            {groups.map((g, i) => {
+              if (g.type === 'tool') return <ToolCallCard key={i} name={g.name} input={g.input} result={g.result} />
+              if (g.type === 'round') return <RoundRow key={i} step={g.step} />
+              return <MetaRow key={i} step={g.step} streaming={streaming} />
+            })}
           </div>
         </div>
       )}

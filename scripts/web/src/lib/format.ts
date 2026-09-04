@@ -39,6 +39,7 @@ export function stepOf(kind: string, data: any): Step {
     stage: data?.stage ? `阶段 · ${data.stage}` : '阶段',
     tool_call: toolLabel(data?.name),
     tool_result: toolLabel(data?.name),
+    loop_turn: data?.round ? `第 ${data.round} 轮` : '取数循环',
   }
   return { kind: kind as Step['kind'], label: map[kind] ?? kind, data }
 }
@@ -54,6 +55,17 @@ export function toolLabel(name: string): string {
     rag_query: '财报检索',
   }
   return known[name] || name
+}
+
+/** Agentic tool loop 的一轮状态 → 中文标签（用于 loop_turn 可视化）。 */
+export function loopStatusLabel(status?: string): string {
+  const map: Record<string, string> = {
+    continue: '继续取数',
+    stop: '数据已足够',
+    'max-reached': '已达上限',
+    'no-progress': '无新进展',
+  }
+  return status ? map[status] || status : ''
 }
 
 /** Derive the short subtitle for a citation/source card. */

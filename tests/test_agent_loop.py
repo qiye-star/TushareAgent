@@ -35,6 +35,11 @@ def _tool_use_response(call_id: str, name: str, args: dict) -> ChatResponse:
     )
 
 
+def _stop_response(text: str = "数据已足。") -> ChatResponse:
+    """模拟 LLM 在看过一轮返回后判定「数据已足够」的停止轮（无 tool_calls → 去合成器）。"""
+    return ChatResponse(stop_reason="end_turn", text=text)
+
+
 async def test_router_tool_synthesize_end_to_end(make_settings) -> None:
     tools = FakeToolProvider(
         SPECS,
@@ -45,6 +50,7 @@ async def test_router_tool_synthesize_end_to_end(make_settings) -> None:
             _router_response('{"intent":"market","out_of_scope":false}'),
             ChatResponse(stop_reason="end_turn", text="比亚迪 最近价格 区间"),  # rewrite_query
             _tool_use_response("c1", "stock_price_range", {"name": "比亚迪"}),
+            _stop_response(),  # 看到返回后判定数据已足 → 停止取数
             ChatResponse(stop_reason="end_turn", text="比亚迪区间约 1604.9 元。"),
         ]
     )
@@ -58,7 +64,7 @@ async def test_router_tool_synthesize_end_to_end(make_settings) -> None:
     assert len(result.tool_results) == 1
     assert result.tool_results[0].is_error is False
     assert result.citations == ["stock_price_range"]
-    assert len(mock.calls) == 4  # router / rewrite_query / tool选择 / synthesizer
+    assert len(mock.calls) == 5  # router / rewrite_query / tool选择 / 停止判定 / synthesizer
     # 决策与生成步骤都应确定性（temperature=0），同问应得同答
     assert all(c.get("temperature") == 0 for c in mock.calls)
 
@@ -102,6 +108,7 @@ async def test_empty_evidence_fallback(make_settings) -> None:
             _router_response('{"intent":"market","out_of_scope":false}'),
             ChatResponse(stop_reason="end_turn", text="比亚迪 最近价格"),  # rewrite_query
             _tool_use_response("c1", "stock_price_range", {"name": "比亚迪"}),
+            _stop_response(),  # 看到空结果后判定停止 → 仍无证据 → no_evidence 兜底
         ]
     )
     agent = Agent(llm=mock, tools=tools, config=make_settings())
@@ -112,7 +119,7 @@ async def test_empty_evidence_fallback(make_settings) -> None:
     # "[]" 不是错误，但为空数据 → 不算证据
     assert result.tool_results[0].is_error is False
     assert result.citations == []
-    assert len(mock.calls) == 3  # router + rewrite_query + tool选择
+    assert len(mock.calls) == 4  # router + rewrite_query + tool选择 + 停止判定
 
 
 async def test_tool_error_becomes_fallback(make_settings) -> None:
@@ -122,6 +129,7 @@ async def test_tool_error_becomes_fallback(make_settings) -> None:
             _router_response('{"intent":"market","out_of_scope":false}'),
             ChatResponse(stop_reason="end_turn", text="比亚迪 行情"),  # rewrite_query
             _tool_use_response("c1", "stock_price_range", {"name": "比亚迪"}),
+            _stop_response(),  # 看到失败结果后判定停止 → 仍无证据 → no_evidence 兜底
         ]
     )
     agent = Agent(llm=mock, tools=tools, config=make_settings())
@@ -131,7 +139,7 @@ async def test_tool_error_becomes_fallback(make_settings) -> None:
     assert "未能取到可靠数据" in result.final_text
     assert len(result.tool_results) == 1
     assert result.tool_results[0].is_error is True  # 异常 → is_error，不算证据
-    assert len(mock.calls) == 3  # router + rewrite_query + tool选择
+    assert len(mock.calls) == 4  # router + rewrite_query + tool选择 + 停止判定
 
 
 class _RaisingLLM:
@@ -222,6 +230,7 @@ async def test_rag_retrieval_adds_evidence(make_settings) -> None:
             _router_response('{"intent":"report","out_of_scope":false}'),
             ChatResponse(stop_reason="end_turn", text="比亚迪 2024 研发投入"),  # rewrite_query
             _tool_use_response("c1", "stock_price_range", {"stock": "比亚迪"}),
+            _stop_response(),  # 数据已足够 → 去合成
             ChatResponse(stop_reason="end_turn", text="研发投入见比亚迪2024年报。"),
         ]
     )
@@ -233,7 +242,7 @@ async def test_rag_retrieval_adds_evidence(make_settings) -> None:
         }]
     )
     graph = build_research_graph(mock, tools, SPECS, max_tokens=cfg.ds_max_tokens, disclaimer=cfg.disclaimer, base_system=cfg.system_prompt, retriever=retriever)
-    state = {"messages": [{"role": "user", "content": "研发投入"}], "original_query": "研发投入", "out_of_scope": False,
+    state = {"messages": [{"role": "user", "content": "比亚迪研发投入"}], "original_query": "比亚迪研发投入", "out_of_scope": False,
              "tool_results": [], "evidence": [], "rag_chunks": [], "citations": [], "usage": None}
     out = await graph.ainvoke(state, config={"configurable": {}})
 
@@ -305,6 +314,7 @@ async def test_tool_fail_rag_succeeds(make_settings) -> None:
             _router_response('{"intent":"report","out_of_scope":false}'),
             ChatResponse(stop_reason="end_turn", text="比亚迪 2025 研发投入"),  # rewrite_query
             _tool_use_response("c1", "stock_price_range", {"stock": "比亚迪"}),
+            _stop_response(),  # 工具失败但有 RAG 兜底 → 数据已足 → 去合成
             ChatResponse(stop_reason="end_turn", text="据年报，研发投入约X亿元。"),
         ]
     )
@@ -332,6 +342,7 @@ async def test_tool_and_rag_parallel_merge(make_settings) -> None:
             _router_response('{"intent":"report","out_of_scope":false}'),
             ChatResponse(stop_reason="end_turn", text="比亚迪 2025 研发投入"),  # rewrite_query
             _tool_use_response("c1", "stock_price_range", {"stock": "比亚迪"}),
+            _stop_response(),  # 工具成功 + RAG 命中 → 数据已足 → 去合成
             ChatResponse(stop_reason="end_turn", text="价格与研发信息如下。"),
         ]
     )
@@ -427,6 +438,7 @@ async def test_structured_output_present(make_settings) -> None:
             _router_response('{"intent":"market","out_of_scope":false}'),
             ChatResponse(stop_reason="end_turn", text="比亚迪 行情"),  # rewrite_query
             _tool_use_response("c1", "stock_price_range", {"stock": "比亚迪"}),
+            _stop_response(),  # 数据已足 → 去合成
             ChatResponse(stop_reason="end_turn", text="比亚迪区间约 1604.9 元。"),
         ]
     )
@@ -449,6 +461,7 @@ async def test_params_normalized_and_validation(make_settings) -> None:
             _router_response('{"intent":"market","out_of_scope":false}'),
             ChatResponse(stop_reason="end_turn", text="比亚迪 涨幅"),  # rewrite_query
             _tool_use_response("c1", "stock_price_range", {"stock": "比亚迪"}),
+            _stop_response(),  # 数据已足 → 去合成
             ChatResponse(stop_reason="end_turn", text="涨幅 2.65%。"),
         ]
     )
@@ -465,6 +478,7 @@ async def test_params_normalized_and_validation(make_settings) -> None:
             _router_response('{"intent":"market","out_of_scope":false}'),
             ChatResponse(stop_reason="end_turn", text="比亚迪 近3月 涨幅"),  # rewrite_query
             _tool_use_response("c1", "stock_price_range", {"stock": "比亚迪", "start": "近3月"}),
+            _stop_response(),  # 仍有校验失败、无证据 → 停止 → no_evidence 兜底
         ]
     )
     r2 = await Agent(llm=mock2, tools=tools2, config=make_settings()).run("比亚迪")
@@ -503,6 +517,7 @@ async def test_on_process_events(make_settings) -> None:
             _router_response('{"intent":"report","out_of_scope":false}'),
             ChatResponse(stop_reason="end_turn", text="比亚迪 研发投入"),  # rewrite_query
             _tool_use_response("c1", "stock_price_range", {"stock": "比亚迪"}),
+            _stop_response(),  # 数据已足 → 去合成
             ChatResponse(stop_reason="end_turn", text="研发投入见年报。"),
         ]
     )
@@ -547,7 +562,7 @@ async def test_rag_funnel_process_event(make_settings) -> None:
     async def on_process(kind: str, data: dict) -> None:
         events.append((kind, data))
 
-    state = {"messages": [{"role": "user", "content": "研发投入"}], "original_query": "研发投入", "out_of_scope": False,
+    state = {"messages": [{"role": "user", "content": "比亚迪研发投入"}], "original_query": "比亚迪研发投入", "out_of_scope": False,
              "tool_results": [], "evidence": [], "rag_chunks": [], "citations": [], "usage": None}
     out = await graph.ainvoke(state, config={"configurable": {"on_process": on_process}})
 
@@ -613,3 +628,378 @@ def test_fin_terms_cover_domain_vocab() -> None:
 
     concepts = extract_concepts("海外乘用车出口产销量")
     assert "海外" in concepts and "乘用车" in concepts and "产销量" in concepts
+
+
+# ---------------------------------------------------------------------------
+# 报告 skill（快报）注册表 + router 命中
+# ---------------------------------------------------------------------------
+
+
+def _tracker_system(base: str = "base") -> str:
+    from demomcp.graph.skills import get_skill
+
+    skill = get_skill("ai_supply_chain_tracker")
+    assert skill is not None
+    return skill.system_prompt(base)
+
+
+def test_skill_registry_tracker_template() -> None:
+    """快报 skill 的合成器提示词含六段固定结构 + 「数据未接入/不编造」约束，且可扩展注册表能按 id 命中。"""
+    from demomcp.graph.skills import SKILLS, get_skill
+
+    assert get_skill("ai_supply_chain_tracker") is not None
+    assert get_skill("not_a_skill") is None
+    assert get_skill(None) is None
+    assert [s.id for s in SKILLS] == ["ai_supply_chain_tracker"]
+
+    text = _tracker_system()
+    for marker in ("板块概览", "标的池行情速览", "关键公告", "业绩预告异动", "产业链催化", "一句话研判", "数据未接入", "不编造"):
+        assert marker in text, f"缺 {marker}: {text}"
+
+
+def test_synth_system_not_polluted_by_tracker() -> None:
+    """普通意图（无 skill）的 synth_system 不夹带快报模板字段——skill 只在命中时生效。"""
+    from demomcp.graph.prompts import synth_system
+
+    assert "一句话研判" not in synth_system("base", intent="market")
+    assert "板块概览" not in synth_system("base", intent="report")
+
+
+def test_should_rag_strategy_with_skill() -> None:
+    """skill 命中时 _should_rag/_strategy 由 skill 覆盖；无 skill 时保持原行为。"""
+    from demomcp.graph.nodes import _should_rag, _strategy
+    from demomcp.graph.skills import get_skill
+
+    tracker = get_skill("ai_supply_chain_tracker")
+    assert tracker is not None
+    assert _should_rag("report", skill=tracker) is False  # 快报跳过年报 RAG
+    assert _strategy("report", skill=tracker) == "auto"   # 快报用默认检索策略
+    # 原行为保持
+    assert _should_rag("market", skill=None) is False
+    assert _should_rag("report", skill=None) is True
+    assert _strategy("report", skill=None) == "factual"
+    assert _strategy(None, skill=None) == "auto"
+
+
+async def test_router_selects_skill(make_settings) -> None:
+    """router 识别到快报意图 → on_process("intent", …) 携带 skill 字段；无证据时稳定走 fallback（不崩）。"""
+    from demomcp.interfaces.types import ChatResponse
+
+    tools = FakeToolProvider(SPECS, {})
+    mock = MockLLM([ChatResponse(stop_reason="end_turn", text='{"intent":"report","skill":"ai_supply_chain_tracker","out_of_scope":false}')])
+    events: list[tuple[str, dict]] = []
+
+    async def on_process(kind: str, data: dict) -> None:
+        events.append((kind, data))
+
+    result = await Agent(llm=mock, tools=tools, config=make_settings()).run(
+        "生成 AI 算力产业链今日跟踪快报", on_process=on_process
+    )
+
+    intent_ev = next((d for k, d in events if k == "intent"), None)
+    assert intent_ev is not None
+    assert intent_ev["skill"] == "ai_supply_chain_tracker"
+    assert intent_ev["intent"] == "report"
+    # 快报应跳过年报 RAG → 空证据 → fallback（稳定、不崩）
+    assert result.stopped_reason == "fallback"
+
+
+async def test_synthesizer_skips_llm_when_render() -> None:
+    """skill 提供 render 时，synthesizer 不走 LLM（no llm.chat），由纯代码把 evidence 渲染成六段，structured 带 skill。"""
+    from demomcp.graph.nodes import make_synthesizer
+    from demomcp.graph.skills import SKILLS
+
+    mock = MockLLM([ChatResponse(stop_reason="end_turn", text="不应被调用")])
+    node = make_synthesizer(mock, max_tokens=128, disclaimer="仅供研究参考", base_system="base", skills=SKILLS)
+    state = {
+        "messages": [{"role": "user", "content": "生成 AI 算力产业链今日跟踪快报"}],
+        "original_query": "生成 AI 算力产业链今日跟踪快报",
+        "intent": "report",
+        "skill": "ai_supply_chain_tracker",
+        "evidence": [{"source_type": "tool", "source": "daily", "content": '[{"name":"新易盛","pct_change":4.5,"close":448.08}]'}],
+        "tool_results": [],
+        "rag_chunks": [],
+        "usage": None,
+    }
+    out = await node(state, {"configurable": {"on_text": None, "on_thinking": None}})
+
+    assert mock.calls == []  # 渲染路径不调用 LLM
+    assert "板块概览" in out["final_answer"] and "标的池行情速览" in out["final_answer"]
+    assert "数据未接入" in out["final_answer"]  # 板块段无数据 → 显式标注
+    assert "新易盛" in out["final_answer"] and "+4.50%" in out["final_answer"]  # 行情行由代码渲染
+    assert "仅供研究参考" in out["final_answer"]  # 免责声明已追加
+    assert out["structured"]["skill"] == "ai_supply_chain_tracker"
+    assert out["structured"]["strategy"] == "auto"
+    assert out["stopped_reason"] == "end_turn"
+
+
+async def test_tool_rag_reveals_only_curated_subset(make_settings) -> None:
+    """tool_rag 只把相关性子集喂给 LLM：meta 恒在、相关工具在、不相关被剪、数量受限。"""
+    full = [
+        ToolSpec("list_apis"), ToolSpec("get_api_info"), ToolSpec("query"), ToolSpec("stock_basic"),
+        ToolSpec("daily"), ToolSpec("adj_factor"), ToolSpec("income"), ToolSpec("fina_indicator"),
+        ToolSpec("bond_basic"), ToolSpec("index_daily"), ToolSpec("top_list"),
+    ]
+    tools = FakeToolProvider(
+        full,
+        {"income": ToolResult(content='{"ok":true,"data":{"revenue":123},"source":{"params":{"period":"20241231"}}}', is_error=False)},
+    )
+    mock = MockLLM([
+        _router_response('{"intent":"report","out_of_scope":false}'),
+        ChatResponse(stop_reason="end_turn", text="贵州茅台 营收 财务"),
+        _tool_use_response("c1", "income", {"period": "20241231"}),
+        ChatResponse(stop_reason="end_turn", text="营收数据已返回。"),
+    ])
+    agent = Agent(llm=mock, tools=tools, config=make_settings(tool_max_revealed=4))
+    await agent.run("贵州茅台营收")
+
+    # call 1 = tool_rag 选工具轮：收到的是裁剪后的子集
+    revealed = mock.calls[2]["tools"]
+    rnames = [t.name for t in revealed]
+    assert "list_apis" in rnames and "query" in rnames  # meta 恒在
+    assert "income" in rnames  # 相关工具保留
+    assert "bond_basic" not in rnames  # 不相关被剪
+    assert len(rnames) <= 4 + 4  # meta(4) + cap(4)
+
+
+# ---------------------------------------------------------------------------
+# agentic tool loop：多轮取数（tool_rag → tool_rag 条件自环）
+# ---------------------------------------------------------------------------
+
+
+async def test_agentic_loop_two_round_then_synthesize(make_settings) -> None:
+    """真实两轮取数：LLM 第 1 轮选 A，看到结果后再选 B，再判定「数据已足够」停止 → 合成。
+
+    验证：证据跨轮累积、RAG 只查一次、loop_turn 事件状态序、两工具都进 structured.sources。
+    """
+    from demomcp.graph.builder import build_research_graph
+
+    cfg = make_settings()
+    tools = FakeToolProvider(
+        SPECS,
+        {
+            "stock_price_range": ToolResult(content='[{"close":1604.9}]', is_error=False),
+            "stock_financials": ToolResult(content='[{"revenue":100}]', is_error=False),
+        },
+    )
+    mock = MockLLM(
+        [
+            _router_response('{"intent":"report","out_of_scope":false}'),
+            ChatResponse(stop_reason="end_turn", text="比亚迪 区间 财务"),  # rewrite_query
+            _tool_use_response("c1", "stock_price_range", {"name": "比亚迪"}),  # 第 1 轮 → A
+            _tool_use_response("c2", "stock_financials", {"stock": "比亚迪"}),   # 第 2 轮 → B
+            _stop_response(),  # 第 3 轮：看到 A、B 数据后判定已足够 → 停止
+            ChatResponse(stop_reason="end_turn", text="区间与财务如下。"),
+        ]
+    )
+    retriever = _fake_retriever([_rag_chunk()])
+    graph = build_research_graph(mock, tools, SPECS, max_tokens=cfg.ds_max_tokens, disclaimer=cfg.disclaimer, base_system=cfg.system_prompt, retriever=retriever)
+    state = {"messages": [{"role": "user", "content": "比亚迪区间与财务"}], "original_query": "比亚迪区间与财务",
+             "out_of_scope": False, "tool_results": [], "evidence": [], "rag_chunks": [], "citations": [], "usage": None}
+    events: list[tuple[str, dict]] = []
+
+    async def on_process(kind: str, data: dict) -> None:
+        events.append((kind, data))
+
+    out = await graph.ainvoke(state, config={"configurable": {"on_process": on_process}})
+
+    assert out["stopped_reason"] == "end_turn"
+    assert [name for name, _ in tools.calls] == ["stock_price_range", "stock_financials"]
+    assert len(out["tool_results"]) == 2
+    assert retriever.calls == 1  # RAG 只查一次（跨两轮不重复检索，防重复证据）
+    assert len(mock.calls) == 6  # router / rewrite / 轮1 / 轮2 / 停止判定 / synthesizer
+    st = out["structured"]
+    assert any(s["type"] == "tool" and s["title"] == "stock_price_range" for s in st["sources"])
+    assert any(s["type"] == "tool" and s["title"] == "stock_financials" for s in st["sources"])
+    loop_turns = [d for k, d in events if k == "loop_turn"]
+    assert [d["status"] for d in loop_turns] == ["continue", "continue", "stop"]
+    assert [d["round"] for d in loop_turns] == [1, 2, 3]
+
+
+async def test_agentic_loop_max_iterations_cutoff(make_settings) -> None:
+    """max_iterations=2：第 2 轮后即达上限 → 强制收尾生成，不会再多调一轮工具。"""
+    cfg = make_settings(max_iterations=2)
+    tools = FakeToolProvider(
+        SPECS,
+        {
+            "stock_price_range": ToolResult(content='[{"close":1604.9}]', is_error=False),
+            "stock_financials": ToolResult(content='[{"revenue":100}]', is_error=False),
+        },
+    )
+    mock = MockLLM(
+        [
+            _router_response('{"intent":"market","out_of_scope":false}'),
+            ChatResponse(stop_reason="end_turn", text="比亚迪 区间 财务"),  # rewrite_query
+            _tool_use_response("c1", "stock_price_range", {"name": "比亚迪"}),  # 第 1 轮 (continue)
+            _tool_use_response("c2", "stock_financials", {"stock": "比亚迪"}),   # 第 2 轮 (max-reached)
+            ChatResponse(stop_reason="end_turn", text="结果如下。"),  # synthesizer（上限后强制收尾）
+        ]
+    )
+    events: list[tuple[str, dict]] = []
+
+    async def on_process(kind: str, data: dict) -> None:
+        events.append((kind, data))
+
+    result = await Agent(llm=mock, tools=tools, config=cfg).run("比亚迪区间与财务", on_process=on_process)
+
+    assert result.stopped_reason == "end_turn"
+    assert [name for name, _ in tools.calls] == ["stock_price_range", "stock_financials"]  # 没有第 3 轮
+    assert len(result.tool_results) == 2
+    assert len(mock.calls) == 5  # router / rewrite / 轮1 / 轮2 / synthesizer（无停止判定轮）
+    loop_turns = [d for k, d in events if k == "loop_turn"]
+    assert [d["status"] for d in loop_turns] == ["continue", "max-reached"]
+    assert [d["round"] for d in loop_turns] == [1, 2]
+
+
+async def test_agentic_loop_max_zero_evidence_fallback(make_settings) -> None:
+    """max_iterations=2 且所有工具都返回空 → 到达上限仍无证据 → 未取到可靠数据兜底（不崩、不无限循环）。"""
+    cfg = make_settings(max_iterations=2)
+    tools = FakeToolProvider(
+        SPECS,
+        {
+            "stock_price_range": ToolResult(content="[]", is_error=False),  # 空数据
+            "stock_financials": ToolResult(content="[]", is_error=False),
+        },
+    )
+    mock = MockLLM(
+        [
+            _router_response('{"intent":"market","out_of_scope":false}'),
+            ChatResponse(stop_reason="end_turn", text="比亚迪 区间"),  # rewrite_query
+            _tool_use_response("c1", "stock_price_range", {"name": "比亚迪"}),  # 第 1 轮 (continue)
+            _tool_use_response("c2", "stock_financials", {"stock": "比亚迪"}),   # 第 2 轮 (max-reached)
+        ]
+    )
+    events: list[tuple[str, dict]] = []
+
+    async def on_process(kind: str, data: dict) -> None:
+        events.append((kind, data))
+
+    result = await Agent(llm=mock, tools=tools, config=cfg).run("比亚迪区间", on_process=on_process)
+
+    assert result.stopped_reason == "fallback"
+    assert "未能取到可靠数据" in result.final_text
+    assert [name for name, _ in tools.calls] == ["stock_price_range", "stock_financials"]
+    assert len(result.tool_results) == 2
+    assert len(mock.calls) == 4  # router / rewrite / 轮1 / 轮2（不到 synthesizer）
+    loop_turns = [d for k, d in events if k == "loop_turn"]
+    assert [d["status"] for d in loop_turns] == ["no-progress", "max-reached"]
+
+
+async def test_agentic_loop_events_carry_round(make_settings) -> None:
+    """循环可视化：每轮 stage/plan/aggregate/loop_turn 都携带轮次号（round），前端可按轮渲染。"""
+    cfg = make_settings()
+    tools = FakeToolProvider(SPECS, {"stock_price_range": ToolResult(content='[{"close":1604.9}]', is_error=False)})
+    mock = MockLLM(
+        [
+            _router_response('{"intent":"market","out_of_scope":false}'),
+            ChatResponse(stop_reason="end_turn", text="比亚迪 价格"),  # rewrite_query
+            _tool_use_response("c1", "stock_price_range", {"name": "比亚迪"}),  # 第 1 轮
+            _stop_response(),  # 停止
+            ChatResponse(stop_reason="end_turn", text="价格如下。"),  # synthesizer
+        ]
+    )
+    events: list[tuple[str, dict]] = []
+
+    async def on_process(kind: str, data: dict) -> None:
+        events.append((kind, data))
+
+    await Agent(llm=mock, tools=tools, config=cfg).run("比亚迪价格", on_process=on_process)
+
+    kinds = [k for k, _ in events]
+    assert "loop_turn" in kinds
+    assert [d.get("round") for k, d in events if k == "stage" and d.get("stage") == "tool_rag"] == [1, 2]
+    assert [d.get("round") for k, d in events if k == "plan"] == [1]
+    assert [d.get("round") for k, d in events if k == "aggregate"] == [1, 2]
+    loop_turn = next(d for k, d in events if k == "loop_turn")
+    assert loop_turn["round"] == 1
+    assert loop_turn["tools"] == ["stock_price_range"]
+    assert loop_turn["status"] == "continue"
+
+
+class _AlwaysWantMoreLLM:
+    """每轮选工具都返回 tool_use（模拟「总想要更多、从不停下」的 LLM）——用于测进展守卫。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def chat(self, *, messages, tools, system=None, max_tokens=8192, stream=True, temperature=None, on_text=None, on_thinking=None):
+        self.calls += 1
+        if not tools:  # router（首个）/ rewrite_query
+            return ChatResponse(
+                stop_reason="end_turn",
+                text='{"intent":"market","out_of_scope":false}' if self.calls == 1 else "海光信息 财务状况",
+            )
+        name = tools[0].name
+        cid = f"c{self.calls}"
+        return ChatResponse(
+            stop_reason="tool_use",
+            tool_uses=[ToolUse(id=cid, name=name, input={})],
+            raw_content={"content": None, "tool_calls": [{"id": cid, "type": "function", "function": {"name": name, "arguments": "{}"}}]},
+        )
+
+    def assistant_message(self, resp):
+        return {"role": "assistant", "content": resp.text or None}
+
+    def tool_results_messages(self, results):
+        return [{"role": "tool", "tool_call_id": tu.id, "content": tr.content} for tu, tr in results]
+
+
+async def test_agentic_loop_stops_on_no_progress(make_settings) -> None:
+    """工具反复返回「无权限/空数据」→ 进展守卫：2 轮无进展即止（不烧满 max_iterations，防死循环）。
+
+    复现场景：LLM 每轮仍要工具，但工具恒回 `{code!=0, data:[]}`（无可用数据）。改前会烧满 10 轮（12 次 LLM 调用），
+    改后 2 轮即 no_evidence 兜底。回归「修死循环」。
+    """
+    cfg = make_settings(max_iterations=10)
+    tools = FakeToolProvider(
+        SPECS,
+        {s.name: ToolResult(content='{"code":-9000,"msg":"无权限","row_count":0,"data":[]}', is_error=False) for s in SPECS},
+    )
+    llm = _AlwaysWantMoreLLM()
+    events: list[tuple[str, dict]] = []
+
+    async def on_process(kind: str, data: dict) -> None:
+        events.append((kind, data))
+
+    result = await Agent(llm=llm, tools=tools, config=cfg).run("海光信息最近一年的财务状况", on_process=on_process)
+
+    assert result.stopped_reason == "fallback"
+    assert "未能取到可靠数据" in result.final_text
+    assert llm.calls == 4  # router / rewrite_query / 轮1 / 轮2（不再烧满 10 轮）
+    loop_turns = [d for k, d in events if k == "loop_turn"]
+    assert [d["status"] for d in loop_turns] == ["no-progress", "no-progress"]
+    assert [d["round"] for d in loop_turns] == [1, 2]
+
+
+async def test_rag_skipped_for_non_corpus_company(make_settings) -> None:
+    """问非比亚迪/宁德时代公司（如贵州茅台）→ RAG 直接跳过（不返回别家年报切片），仅工具路作答。"""
+    from demomcp.graph.builder import build_research_graph
+
+    cfg = make_settings()
+    tools = FakeToolProvider(SPECS, {"stock_price_range": ToolResult(content='[{"close":1604.9}]', is_error=False)})
+    mock = MockLLM(
+        [
+            _router_response('{"intent":"report","out_of_scope":false}'),
+            ChatResponse(stop_reason="end_turn", text="贵州茅台 研发投入"),  # rewrite_query
+            _tool_use_response("c1", "stock_price_range", {"stock": "600519.SH"}),
+            _stop_response(),
+            ChatResponse(stop_reason="end_turn", text="贵州茅台研发投入相关数据（来自工具）。"),
+        ]
+    )
+    retriever = _fake_retriever(
+        [{
+            "doc_id": "d1", "doc_title": "比亚迪2024年报", "chunk_index": 0, "text": "研发投入约 X 亿元", "score": 0.9,
+            "metadata": {"company": "比亚迪", "year": 2024, "section_path": ["3.2 研发投入"], "page_start": 42,
+                         "page_end": 42, "heading": "研发投入", "block_type": "paragraph", "doc_title": "比亚迪2024年报"},
+        }]
+    )
+    graph = build_research_graph(mock, tools, SPECS, max_tokens=cfg.ds_max_tokens, disclaimer=cfg.disclaimer, base_system=cfg.system_prompt, retriever=retriever)
+    state = {"messages": [{"role": "user", "content": "贵州茅台研发投入"}], "original_query": "贵州茅台研发投入", "out_of_scope": False,
+             "tool_results": [], "evidence": [], "rag_chunks": [], "citations": [], "usage": None}
+    out = await graph.ainvoke(state, config={"configurable": {}})
+
+    assert out["stopped_reason"] == "end_turn"
+    assert retriever.calls == 0  # RAG 被跳过（语料无贵州茅台）
+    structured = out["structured"]
+    rag_sources = [s for s in structured["sources"] if s["type"] == "rag"]
+    assert rag_sources == []  # 不出现别家年报来源

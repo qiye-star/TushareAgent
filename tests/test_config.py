@@ -60,3 +60,36 @@ def test_tushare_mcp_url_from_env(make_settings, monkeypatch) -> None:
     monkeypatch.setenv("TUSHARE_MCP_URL", "http://10.0.0.1:9000/mcp")
     s = make_settings()
     assert s.tushare_mcp_url == "http://10.0.0.1:9000/mcp"
+
+
+def test_wind_defaults_offline(make_settings) -> None:
+    s = make_settings()
+    assert s.wind_api_key == ""
+    assert s.wind_enabled is True
+    assert s.wind_configured is False
+
+
+def test_wind_configured_gate(make_settings) -> None:
+    # key 为空 → 未装配
+    assert make_settings().wind_configured is False
+    # 有 key → 装配
+    assert make_settings(wind_api_key="ak_x").wind_configured is True
+    # key + WIND_ENABLED=false → 未装配
+    assert make_settings(wind_api_key="ak_x", wind_enabled=False).wind_configured is False
+
+
+def test_effective_system_prompt_mentions_wind_only_when_configured(make_settings) -> None:
+    base = make_settings().system_prompt
+    assert make_settings().effective_system_prompt == base  # 未装配：逐字节一致
+    prompt = make_settings(wind_api_key="ak_x").effective_system_prompt
+    assert "wind_" in prompt
+    assert len(prompt) > len(base)
+
+
+def test_effective_system_prompt_injects_wind_usage_guide(make_settings) -> None:
+    prompt = make_settings(wind_api_key="ak_x").effective_system_prompt
+    # WIND_USAGE_GUIDE 的关键约定被注入
+    assert "Wind 格式" in prompt
+    assert "自然语言" in prompt
+    assert "wind_search_stocks" in prompt
+    assert "不要用" in prompt or "不要**用" in prompt

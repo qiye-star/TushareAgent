@@ -142,9 +142,15 @@ def _log_registered_tools(specs: list[ToolSpec]) -> None:
 
 @asynccontextmanager
 async def mcp_tool_provider(
-    url: str, *, timeout: float = 30.0, retries: int = 2
+    url: str, *, timeout: float = 30.0, retries: int = 2, headers: dict[str, str] | None = None
 ) -> AsyncIterator[MCPToolProvider]:
-    """经 HTTP 连接独立 mcp_server 并复用一条 MCP 连接，整个 asyncio 会话内有效。"""
-    async with streamablehttp_client(url) as (read, write, _session_id), ClientSession(read, write) as session:
+    """经 HTTP 连接独立 mcp_server 并复用一条 MCP 连接，整个 asyncio 会话内有效。
+
+    headers 供需要自定义鉴权头的端点使用（如万得 Wind 的 `Authorization: Bearer <key>`）。
+    显式传 `sse_read_timeout=timeout`，避免 `mcp>=1.28` 默认 300s 的挂起阈值覆盖读超时预期。
+    """
+    async with streamablehttp_client(
+        url, headers=headers, timeout=timeout, sse_read_timeout=timeout
+    ) as (read, write, _session_id), ClientSession(read, write) as session:
         await session.initialize()
         yield MCPToolProvider(session, timeout=timeout, retries=retries)

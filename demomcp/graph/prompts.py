@@ -1,25 +1,28 @@
-"""四节点状态机的系统提示词（工具无关，具体工具由 ToolProvider::list_tools 提供）。
+"""五节点状态机的系统提示词（工具无关，具体工具由 ToolProvider::list_tools 提供）。
 
-Router 用严格 JSON 提示做意图分类；Tool/RAG 与 Synthesizer 在「domain 基础提示」（settings.system_prompt）
-之上叠加各自的任务引导，从而让编排器尊重上层语义工具层/标的约束，不改即插即用。
+Router 用严格 JSON 提示做意图分类 + 报告 skill 命中；Tool/RAG 与 Synthesizer 在「domain 基础提示」
+（settings.system_prompt）之上叠加各自的任务引导，从而让编排器尊重上层语义工具层/标的约束，不改即插即用。
 """
 
 from __future__ import annotations
 
-ROUTER_SYSTEM = (
-    "你是金融数据助手的意图识别器。判断用户要哪种投研任务，仅返回一个 JSON 对象："
-    '{"intent": "market" | "report" | "compare", "out_of_scope": false}。'
+# 基础 router 文案：意图分类 + skill 字段（skill 由 skills.build_router_system 视注册表拼接命中清单）。
+ROUTER_BASE = (
+    "你是面向 A 股市场的投研助手意图识别器。判断用户要哪种投研任务，仅返回一个 JSON 对象："
+    '{"intent": "market" | "report" | "compare", "skill": "<skill_id>" | null, "out_of_scope": false}。\n'
     "intent 分界：market=纯查行情/指标（价格、涨跌幅、区间表现、估值快照）；"
     "report=财报/财务细节（营收、净利润、毛利率、研发投入、资产负债率等财务科目的数值与方向）；"
-    "compare=对两个及以上的标的/区间做对比分析。"
+    "compare=对两个及以上标的/区间做对比分析。\n"
+    "skill 用于「请求生成某类结构化投研报告」：当用户要生成下方列出的报告 skill（而非单点查询/对比）时，"
+    "在 skill 字段填对应 skill_id，intent 填其归类（如 report）；否则 skill 填 null。\n"
     "仅当用户问题明显与金融/投研数据无关（如天气、闲聊、非金融话题）时置 out_of_scope=true；"
-    "涉及任意 A 股公司/行情/财务/对比的问题一律为 not out_of_scope。"
+    "涉及任意 A 股公司/行情/财务/对比/板块跟踪的问题一律为 not out_of_scope。\n"
     "不要输出任何多余文本，只输出 JSON。"
 )
 
 
 REWRITE_SYSTEM = (
-    "你是投研年报 RAG 检索的查询改写器。目标：把用户的原始提问改写成一段更契合年报检索的查询子句，"
+    "你是投研检索（年报/财报/经营）的查询改写器。目标：把用户的原始提问改写成一段更契合年报检索的查询子句，"
     "让向量与 BM25 检索更容易命中相关章节与表格。\n"
     "改写要求：\n"
     "1. 提取并展开「公司（股票名称/简称/代码）+ 财年 + 指标/主题」，改写时保留并凸显公司名与年份。\n"
@@ -31,17 +34,40 @@ REWRITE_SYSTEM = (
 )
 
 
-def select_system(base: str, intent: str | None) -> str:
-    """Tool/RAG 节点的取数引导：基于 domain 提示 + 意图给方向（不点名工具，由模型对照 tool 清单自选）。"""
+def select_system(base: str, intent: str | None, skill_hint: str = "",
+                  *, round_no: int | None = None, max_iterations: int | None = None) -> str:
+    """Tool/RAG 节点的取数引导：基于 domain 提示 + 意图（+ 可选 skill 取数引导）给方向（不点名工具，由模型对照 tool 清单自选）。
+
+    循环语义：本节点可被 tool_rag → tool_rag 条件自环反复进入。`round_no` 为当前轮次（>1 时提示 LLM 已看到此前各轮返回），
+    `max_iterations` 为取数轮次上限；「数据已足够」的信号为**返回无 tool_calls**（本函数据此显式引导模型停止）。
+    """
     hint = {
         "market": "用户要行情/指标。从可用工具中选行情/指标类工具，给足标的与日期（区间）参数，注意复权口径。",
         "report": "用户要财报/财务细节。从可用工具中选财报/财务类工具，给足标的与报告期/期数；可结合财报知识库作答。",
         "compare": "用户要对比分析。可能需要调用一次或多次取数工具，取回可比数据（多标的/多区间），便于对比；可结合财报知识库。",
     }.get(intent or "", "用户要行情/指标。从可用工具中选行情/指标类工具，给足标的与日期参数。")
+    skill_block = f"\n【本报告 skill 的取数引导】{skill_hint}" if skill_hint else ""
+    # 循环（多轮取数）引导：明确「够就停、不够就补、不重复取」的决策规则。
+    if max_iterations:
+        cap = f"最多 {max_iterations} 轮取数"
+        if round_no and round_no > 1:
+            loop_talk = (
+                f"\n当前是第 {round_no} 轮取数，你已看到此前各轮的工具返回结果。请基于这些结果决策："
+                "若数据已足以作答就**不要再调用任何工具**（即不输出 tool_calls），直接收尾生成；"
+                f"若仍缺数据，可调用**与之前不同**的工具补齐。{cap}。"
+                "注意：若某个工具返回 `code!=0`（无权限/积分不足/接口下线）或空数据、查不到，说明**该接口取不到这份数据**"
+                "——不要为它反复尝试其它工具；若关键数据都取不到，就在这一轮如实说明并停止调用工具（不再输出 tool_calls）。"
+            )
+        else:
+            loop_talk = f"\n你可以多轮调用工具：先取数、查看返回后再决定。数据已足够即停止调用工具（不输出 tool_calls）；{cap}。" \
+                "若某工具返回无权限/空数据/查不到，说明该数据取不到，不要反复试其它工具空转；取不到关键数据就如实说明并停止。"
+    else:
+        loop_talk = ""
     return (
-        f"{base}\n\n本轮意图：{intent or '未定'}。{hint}\n"
-        "只给出必要的一次或多次工具调用，不要重复取相同的数；拿不准可用接口时先用 list_apis/get_api_info 确认。"
-        "标的传合法 ts_code（如 600519.SH），不确定代码时用 stock_basic 查询；日期传多格式或相对词（如近一年/今天）。\n"
+        f"{base}\n\n本轮意图：{intent or '未定'}。{hint}{skill_block}{loop_talk}\n"
+        "只给出必要的一次或多次工具调用，不要重复取相同的数（已取到/可推导的不要重复拉）；拿不准可用接口时先用 list_apis/get_api_info 确认。"
+        "标的传合法代码：Tushare 用 ts_code（如 600519.SH），万得用带交易所后缀的 Wind 代码（如 600519.SH）；"
+        "不确定代码用 stock_basic(Tushare) 或 wind_search_stocks(Wind) 查询；日期传多格式或相对词（如近一年/今天）。\n"
         "报告期选择（务必确定唯一）：财报/年报类问题只用**最新已发布年度**的年报期次（如 2024年报 → 20241231）"
         "或最近季度期次（2024Q1 / 2024年报 / 20240931 等容错写法）；区间类用起止日期；不确定时用默认『近两年』。"
     )
@@ -55,7 +81,7 @@ def synth_system(base: str, intent: str | None = None) -> str:
         else ""
     )
     return (
-        f"{base}\n\n请聚焦用户的问题，基于下方『可用数据』中与问题相关的全部依据，给出结构清晰、信息完整的回答；"
+        f"{base}\n\n这是投研问答。请聚焦用户的问题，基于下方『可用数据』中与问题相关的全部依据，给出结构清晰、信息完整的投研回答；"
         f"不要遗漏与问题相关的证据，也不要塞入与问题无关的检索块；{extra}\n\n"
         "【输出格式规范】\n"
         "1. 结构分层：先给一句核心结论；再按逻辑分节展开（用『一、二、三』或 `### ` 小节标题按主题分组，标题不超过三层），"
