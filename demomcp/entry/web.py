@@ -29,7 +29,6 @@ from demomcp.config.settings import Settings
 from demomcp.db.store import ChatHistoryStore, build_store
 from demomcp.providers.llm.deepseek import DeepSeekLLMClient
 from demomcp.providers.tools.mcp import mcp_tool_provider
-from demomcp.providers.tools.stocks import StockToolProvider
 from demomcp.rag.schemas import RetrievalPlan
 
 # React 前端构建产物输出到 scripts/web/dist（见 scripts/web/vite.config.ts 的 build.outDir）。
@@ -113,9 +112,8 @@ async def chat(req: ChatRequest) -> StreamingResponse:
             async with mcp_tool_provider(
                 settings.tushare_mcp_url, timeout=settings.mcp_timeout, retries=settings.mcp_retries
             ) as tools:
-                # 语义工具层：包裹底层 MCP，只暴露双票限定语义工具（隐藏通用 query/list_apis/get_api_info）
-                stock_tools = StockToolProvider(tools, config=settings)
-                agent = Agent(llm=llm, tools=stock_tools, config=settings)
+                # 直接使用原始 MCP provider：LLM 看到服务端暴露的全部工具（list_apis/get_api_info/query + 各接口工具），可查任意标的任意接口
+                agent = Agent(llm=llm, tools=tools, config=settings)
                 result = await agent.run(
                     req.message,
                     history=history,

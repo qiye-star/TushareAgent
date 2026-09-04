@@ -7,7 +7,7 @@ demo-mcp 是一个 **LLM + MCP** 数据对话助手：用自然语言提问，�
 - **LLM 后端 DeepSeek**（OpenAI 兼容端点，可换）；工具调度、错误处理都在本地。
 - **自带 uv 环境**：`uv sync` 生成项目自己的 `.venv`，独立运行、互不干扰。
 - **LangGraph 五节点编排**：`router`（意图分类 + 越界判断）→ `rewrite_query`（RAG 查询改写）→ `tool_rag`（**并行**：LLM 选工具 + RAG 检索）→ `synthesizer`（综合 + 引用 + 免责声明）／越界或无证据走 `fallback`。图上无回环，一次提问一条路径。
-- **语义工具层**：`StockToolProvider` 包裹 `MCPToolProvider`，硬允许列表**只放行「比亚迪 002594.SZ / 宁德时代 300750.SZ」**，对外暴露 4 个语义工具（`stock_available` / `stock_realtime_quote` / `stock_price_range` / `stock_financials`），隐藏通用 MCP `query`，并内置日期/复权口径/期数归一化。
+- **全量 MCP 查询**：应用直接使用原始 `MCPToolProvider`（不叠加语义/白名单层），LLM 看到服务端暴露的全部工具（`list_apis` / `get_api_info` / `query` + 各接口工具如 `daily`/`income`/`stock_basic`），可查**任意 A 股上市公司/指数/任意接口**，不再限定比亚迪/宁德时代。
 - **连接 Tushare 官方 MCP**：应用经 `TUSHARE_MCP_URL` 直连 `https://api.tushare.pro/mcp/?token=...`，工具由官方服务器暴露、运行时自动发现（`list_tools`）并打印清单。内置 `mcp_server/`（本地代理→每接口工具）默认停用，仅作后备。
 - **独立 RAG 财报知识库**（`demomcp/rag/`）：把 A 股年报 PDF（如比亚迪/宁德时代）解析 → 章节树 → 分块 → 混合检索（BM25 + 稠密**三路 RRF** 融合）→ 重排 → **确定性引用**（不靠 LLM 编页码）；索引持久化到 `data/vectorstore/`（**Milvus-Lite + SQLite**），可离线评估（`scripts/eval_rag.py`）。
 - **可 Docker 化**：`docker compose up` 一键起 Web 控制台。
@@ -22,7 +22,7 @@ demo-mcp 是一个 **LLM + MCP** 数据对话助手：用自然语言提问，�
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | **系统架构（当前实现）**：五节点 LangGraph 状态机与条件边、各层组件与运行语义、会话持久化三表、配置与部署形态；含分层/状态机/SSE 时序/ER 图等 5 张图 | 所有开发/维护者，从这读起 |
 | [RAG_INTEGRATION.md](docs/RAG_INTEGRATION.md) | **RAG 集成与运行（当前实现）**：检索计划构造、三路 RRF、重排与阈值、证据组装、Milvus-Lite+SQLite 持久化、`/api/rag/retrieve` HTTP 服务、RAG_* 全量默认值表与三个验证脚本（`eval_rag`/`validate_rag`/`dba_rag`） | 修改/调试 RAG 的开发者 |
 | [RAG_FINANCE.md](docs/RAG_FINANCE.md) | **RAG 设计蓝图**（含「实现状态（截至 2026-08-27）」核对表）：**为什么**混合检索、如何保证引用不编造、评估门禁标准；含未来项（hyDE、质量自检回环等） | 想改检索算法/评估的开发者 |
-| [tool-call-layer.md](docs/tool-call-layer.md) | **语义工具层设计**（已按设计实现）：双票限定、4 个语义工具、参数归一化、is_error 错误语义、JSON 输出契约 | 扩展工具层的开发者 |
+| [tool-call-layer.md](docs/tool-call-layer.md) | ~~语义工具层设计（双票限定）~~ **已废弃/绕过**：现直达原始 MCP 做全量查询，不再叠加语义层 | 历史背景/弃用说明 |
 | [TEST_REPORT.md](docs/TEST_REPORT.md) | **测试报告（2026-08-27，3 次测试 + 量化评分卡）**：pytest 169 项全量、RAG 离线评估 5 项指标、真引擎验证（达标：BYD/CATL recall 1.00、隔离 ✅；余留：表格溯源 0/2）、真实端到端冒烟（数值与官方 MCP 直查一致）、**总评分 89.4/100** | 关注质量门禁的历史记录 |
 
 > `docs/` 目录内另有 3 份年报 PDF（语料样本，**非文档**）。
@@ -44,9 +44,9 @@ demo-mcp/
 │   ├── providers/    实现层：可插拔适配器（tools: mcp/fake + stocks 语义层；llm: deepseek/mock）
 │   ├── rag/          RAG 财报知识库（PDF 摄取 / 混合检索 / 持久化 / 确定性引用；离线优先）
 │   ├── db/           数据层：SQLAlchemy 2.0 异步，会话历史 + 每轮 UI 数据（独立库）
-│   ├── config/       配置层：Settings + 项目根 + MCP URL + 语义工具/RAG 配置
+│   ├── config/       配置层：Settings + 项目根 + MCP URL + RAG 配置
 │   └── entry/        入口层：CLI / Web（SSE 流式 + REST + RAG HTTP 端点）
-├── tests/            离线 gate（FakeToolProvider + MockLLM + 内存 SQLite；RAG/语义工具单测）
+├── tests/            离线 gate（FakeToolProvider + MockLLM + 内存 SQLite；RAG/MCP 取数单测）
 ├── scripts/          smoke_e2e.py（真实端到端）/ eval_rag.py（RAG 离线评估）/ validate_rag.py（真引擎验证）/ dba_rag.py（离线建索引）
 └── scripts/web/      React + TS + Tailwind 前端（Vite + Zustand；三栏工作台：会话 / 对话 / 配置面板）
 ```
@@ -82,7 +82,7 @@ cd scripts/web && npm ci && npm run build && cd ../..
 # 开发模式：另开终端 `cd scripts/web && npm run dev`（Vite 代理 /chat、/api 到 8010）
 ```
 
-示例会话：`比亚迪最近一个月的日线` / `宁德时代近两年的研发投入` —— 助手直接调用对应语义工具取数（并**并行检索**年报 RAG），最后总结输出（含内联引用），并把每轮消息、完整上下文与结构化 UI 数据落到 `demo.db`（可用侧栏查看/恢复）。语义工具层只放行比亚迪/宁德时代两只标的。
+示例会话：`比亚迪最近一个月的日线` / `贵州茅台近两年的营收` —— 助手经 `list_apis`/`get_api_info` 确定接口后用 `query`/对应接口工具取数（并**并行检索**年报 RAG，语料仍为比亚迪/宁德时代年报），最后总结输出（含内联引用），并把每轮消息、完整上下文与结构化 UI 数据落到 `demo.db`（可用侧栏查看/恢复）。标的与接口不再受限，可查任意 A 股数据。
 
 ### RAG 索引与检索（可选）
 
@@ -142,21 +142,13 @@ docker run --rm -p 8010:8010 --env-file .env \
 | `DS_MODEL` | `deepseek-chat` | 模型 id（推理类可换能出 `reasoning_content` 的） |
 | `DS_STREAMING` | `true` | 是否流式 |
 | `DS_MAX_TOKENS` | `8192` | 单次回复最大 token |
-| `DEMO_SYSTEM_PROMPT` | 内置双票金融 prompt（已按语义工具面改写） | 系统提示词 |
+| `DEMO_SYSTEM_PROMPT` | 内置全量金融 prompt（任意 A 股标的/全量接口，指引 list_apis→get_api_info→query） | 系统提示词 |
 | `DEMO_MAX_ITERATIONS` | `10` | ⚠️ 目前图无循环，此值无读取者（历史遗留） |
 | `DISCLAIMER` | 内置免责声明 | 合成器/兜底文案追加的免责声明 |
 | `DEMO_DATABASE_URL` | 空→`demo.db` | 会话历史库；也支持 `mysql/asyncmy`、`postgres/asyncpg` |
 | `TUSHARE_MCP_URL` | `https://api.tushare.pro/mcp/` | Tushare 官方 MCP 地址（token 放 URL query）；应用经它连接，工具运行时自动发现 |
 | `DEMO_MCP_TIMEOUT` | `30` | 单次 MCP 工具调用读超时（秒） |
 | `DEMO_MCP_RETRIES` | `2` | 工具调用重试次数（**异常与业务失败都会重试**；权限/积分失败重试后转友好提示，非错误） |
-
-### 语义工具层（双票限定）
-
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `DEMO_STOCKS` | `002594.SZ,300750.SZ` | 硬允许列表（逗号分隔 ts_code）；**仅比亚迪/宁德时代**，其它标的会被拒绝 |
-| `STOCK_DEFAULT_ADJ` | `qfq` | 区间涨跌幅默认复权口径（`qfq`/`hfq`/`none`） |
-| `STOCK_FINANCIAL_PERIODS` | `8` | 财务数据默认期数（近 2 年 = 8 期） |
 
 ### RAG 财报知识库（离线优先，已接入实时循环）
 
@@ -202,7 +194,7 @@ docker run --rm -p 8010:8010 --env-file .env \
 
 - **流式输出**：`thinking`（模型 reasoning_content，若有）/ `text`（内容增量）/ `tool_call{name,input}` / `tool_result{content,ok}` / `process` / `done` / `error` 事件，末尾 `__end__` 哨兵。
 - **思考过程**：`reasoning_content` 在默认展开的「思考过程」面板里逐字流式呈现（顶栏「深度思考」开关会请求 `deepseek-reasoner`，从而真正产生 thinking；注意其工具调用支持取决于 API 版本）。
-- **工具调用**：`tool_call` + `tool_result` 渲染为**工具卡**（工具名 + 入参 JSON + 返回结果 + 成功/失败徽章）。语义工具层只暴露 4 个工具；RAG 类答案以 Markdown + 内联引用返回。
+- **工具调用**：`tool_call` + `tool_result` 渲染为**工具卡**（工具名 + 入参 JSON + 返回结果 + 成功/失败徽章）。工具面为 MCP 服务端暴露的全部接口；RAG 类答案以 Markdown + 内联引用返回。
 - **Markdown**：React 前端用 `react-markdown` + `remark-gfm` + `remark-breaks` 渲染，经 `@tailwindcss/typography`（prose）排版表格/标题/列表/代码块（默认不解析原始 HTML，天然防 XSS；表格窄屏可横向滚动，深色 invert 适配）。
 - **思考 / 引用**：`process` 事件（`intent`/`rewrite`/`stage`/`retrieval`/`funnel`/`plan`/`params`/`validation`/`aggregate`）进入**默认折叠的「思考过程」**；`done.structured.sources/citations/claims` 在回答底部渲染**引用溯源卡**。
 - **日志/恢复**：侧栏列出历史会话（`GET /api/sessions`），点开看消息（`GET /api/sessions/{id}`）、每轮 UI 数据（`GET /api/sessions/{id}/turns`）并可**继续**（服务端用完整上下文恢复）；也可删除（`DELETE /api/sessions/{id}`）。出错时工具 `is_error` 与 agent 异常以 `role=tool/error` 落库，侧栏可定位。
@@ -233,7 +225,7 @@ cd demo-mcp
 覆盖：
 
 - **主链路**：agent 循环全链路（`FakeToolProvider` + `MockLLM`）、LangGraph 五节点路由（越界 → `fallback`、双空 → `no_evidence`）、`code!=0` 作为正常结果、工具异常转 `is_error`、MCP 重试/超时。
-- **语义工具层**：`test_stock_input.py`（代码/日期/复权/期数归一化、硬允许列表）、`test_stock_provider.py`（`StockToolProvider` 语义工具 + 错误约定）。
+- **MCP 取数**：`test_tool_provider.py`（`MCPToolProvider` 原始 MCP：重试/超时/`code!=0` 业务结果）。原先的语义工具层（`test_stock_input` / `test_stock_provider`）已随该层移除而删除。
 - **RAG**：20 个 `test_rag_*.py`（PDF 解析、章节树、表格分块、BM25、向量库、重排、引用、摄取幂等、RelStore 持久化、HTTP 检索器、server 助手、funnel 事件、真实 PDF 端到端、sparse import 守卫、离线评估门禁）。
 - **配置/数据层**：默认值/路径/DB URL；内存 SQLite 的 `ChatMessage` 日志 + `ChatTurn` 恢复 + `ChatTurnData` 往返。
 

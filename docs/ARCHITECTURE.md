@@ -1,7 +1,7 @@
-# 系统架构（当前实现）：LangGraph 五节点状态机的 LLM+MCP 双票数据助手
+# 系统架构（当前实现）：LangGraph 五节点状态机的 LLM+MCP 全量数据助手
 
 > 本文档以**当前代码为准**（核对日期 2026-08-27）。描述 `demo-mcp`（`D:\TushareAgent`）实际的层次结构、LangGraph 状态机、各组件运行语义与部署形态。
-> - RAG 全量细节见 `RAG_INTEGRATION.md`（现状权威）；RAG 的设计动因（为何混合检索、如何保证引用不编造）见 `RAG_FINANCE.md`（设计蓝图）；语义工具层设计见 `tool-call-layer.md`。
+> - RAG 全量细节见 `RAG_INTEGRATION.md`（现状权威）；RAG 的设计动因（为何混合检索、如何保证引用不编造）见 `RAG_FINANCE.md`（设计蓝图）；现已废弃的语义工具层设计（历史背景）见 `tool-call-layer.md`。
 > - 凡标注「**未实现 / 预留 / 遗留**」的构件请以第 14 节的如实清单为准，不要据此推断代码行为。
 
 ## 1. 概述与文档地图
@@ -15,7 +15,7 @@
 | `ARCHITECTURE.md`（本文） | 当前实现 | 系统架构：五节点状态机、层次、运行语义、部署 |
 | `RAG_INTEGRATION.md` | 当前实现 | RAG 集成与运行：检索计划、RRF、持久化、HTTP 服务、全量配置表 |
 | `RAG_FINANCE.md` | 设计蓝图 | RAG 动机与评估标准（含「实现状态」核对表） |
-| `tool-call-layer.md` | 设计→已实现 | 语义工具层设计（双票限定、4 工具） |
+| `tool-call-layer.md` | 设计→已废弃 | ~~语义工具层设计（双票限定、4 工具）~~ 现直达原始 MCP 做全量查询 |
 | `TEST_REPORT.md` | 测试记录 | 2026-08-27 完整测试（3 次 + 量化评分卡 89.4/100）：pytest 169 项、RAG 离线/真引擎指标、E2E |
 
 ## 2. 分层架构
@@ -37,7 +37,7 @@ flowchart TB
     end
     subgraph L4["providers（可插拔适配器）"]
         LLM["llm: deepseek / mock"]
-        TOOL["tools: mcp（官方 MCP）<br/>stocks（语义工具层）<br/>fake（测试）"]
+        TOOL["tools: mcp（官方 MCP，全量查询）<br/>fake（测试）"]
     end
     subgraph L5["rag（财报知识库，经注入接入）"]
         RT["runtime / http_retriever"]
@@ -79,12 +79,12 @@ flowchart TB
 
 ### 3.1 CLI（`demomcp/entry/cli.py`）
 
-`main()`：要求 `settings.ds_api_key`（缺失 exit 2）→ 建 `DeepSeekLLMClient`、`store = build_store(effective_database_url)` + `store.init()` → `async with mcp_tool_provider(...)` 再包 `StockToolProvider` → `Agent(llm, tools=stock_tools, config=settings)`。每轮：`agent.run(prompt, history=history, on_text, on_thinking)` 打印 `[stop: {stopped_reason}]`，逐消息 `store.append(session_id, "user"/"assistant"/"tool", …)`，`history = result.messages`（下轮携带完整 OpenAI 风格消息列表）。`exit/quit/q` 退出。
+`main()`：要求 `settings.ds_api_key`（缺失 exit 2）→ 建 `DeepSeekLLMClient`、`store = build_store(effective_database_url)` + `store.init()` → `async with mcp_tool_provider(...) as tools:` 直接用 `tools`（原始 MCP provider）构 `Agent(llm, tools=tools, config=settings)`。每轮：`agent.run(prompt, history=history, on_text, on_thinking)` 打印 `[stop: {stopped_reason}]`，逐消息 `store.append(session_id, "user"/"assistant"/"tool", …)`，`history = result.messages`（下轮携带完整 OpenAI 风格消息列表）。`exit/quit/q` 退出。
 
 ### 3.2 Web（`demomcp/entry/web.py`，FastAPI `Tushare demo-mcp`）
 
 - `lifespan`：按 `settings.effective_database_url` 建 store + `init()`，存 `app.state`；关停时 dispose（store 跨请求复用）。
-- `POST /chat`（`ChatRequest{message, session_id?, model?}`，`model` 供前端「深度思考」开关传 `deepseek-reasoner`）：返回 SSE `StreamingResponse`。**每请求新建** `DeepSeekLLMClient`（model = 请求或 settings 默认）+ `mcp_tool_provider` + `StockToolProvider` + `Agent`（MCP 会话只存活一轮）。
+- `POST /chat`（`ChatRequest{message, session_id?, model?}`，`model` 供前端「深度思考」开关传 `deepseek-reasoner`）：返回 SSE `StreamingResponse`。**每请求新建** `DeepSeekLLMClient`（model = 请求或 settings 默认）+ `mcp_tool_provider`（原始 MCP）+ `Agent`（MCP 会话只存活一轮）。
   - 恢复：`store.last_turn_messages(session_id)` 拿上一轮完整消息（含 tool_calls/tool_call_id）精确还原上下文。
   - SSE 事件：`text` / `thinking` / `tool_call{name,input}` / `tool_result{content,ok}` / `process{kind,data}` / `done{stopped_reason,session_id,usage,structured}` / `error`，末尾 `__end__` 哨兵。
   - 落库三连：`append`（每消息）+ `append_turn`（整轮消息 JSON）+ `append_turn_data`（UI payload：query/thinking/steps/answer/sources/citations/claims/metadata/intent/strategy/stopped_reason/usage/error）。
@@ -203,19 +203,11 @@ flowchart TD
 2. `result.isError` 或解析 JSON 的 `code!=0`（`_is_business_error`）→ **也重试**；
 3. 耗尽后仍业务失败：文案含「积分/权限/无权限/提升/points」→ `is_error=False` 的友好中文提示（让 LLM 转述「积分不足」）；其它业务失败 → 保留原文 + `is_error=last_was_error`。
 
-### 8.2 tools/stocks.py（`StockToolProvider`，语义工具层）
+### 8.2 tools/（`MCPToolProvider`，直接全量取数）
 
-硬允许列表 `ALLOWLIST = ("002594.SZ","300750.SZ")`（`DEMO_STOCKS`），对外只暴露 4 个语义工具（隐藏通用 `query`）：
+> **变更（2026-09）**：曾存在一层「语义工具层」`StockToolProvider`（`stocks.py`），用硬允许列表 `ALLOWLIST=("002594.SZ","300750.SZ")` 把数据面限定为比亚迪/宁德时代、只暴露 4 个语义工具。现已**移除该层**：应用直接使用原始 `MCPToolProvider` 作为 `Agent` 的 `tools`，LLM 看到服务端暴露的全部工具（`list_apis` / `get_api_info` / `query` + 各接口工具），可查**任意 A 股/任意接口**。`stocks.py` 及 `DEMO_STOCKS`/`STOCK_*` 配置同步删除。
 
-| 工具 | 行为 | 兜底 |
-|---|---|---|
-| `stock_available` | 列出允许的公司（无参） | — |
-| `stock_realtime_quote` | 最新价/涨跌幅/pe_ttm/pb/总市值 | real-time 失败 → `daily` + `daily_basic` 最后一个交易日 |
-| `stock_price_range` | 区间涨跌幅；`adj` 默认 `qfq`（`hfq/none` 可换），`adj_factor` 不可得 → 实际 none | 由 `return_pct` 的复权收盘价计算 |
-| `stock_financials` | 逐期营收/净利/毛利率/负债率/净利率/roe/eps（`income`+`fina_indicator`） | `STOCK_FINANCIAL_PERIODS=8` 期 |
-
-错误映射（**关键约定**）：`StockInputError`（输入非法，可自纠）与 `StockBusinessError`（业务失败，含 `permission` 标记）→ **`is_error=False`**（LLM 读友好文案自行调整）；`StockFetchError`（取数失败）→ **`is_error=True`**。只对抛出的异常重试，业务结果不重试（与 MCP 层一致）。
-输出契约：`{"ok": true, "tool", "company"?, "ts_code"?, "data", "source": {"api": [...], "params"?, "adj"?, "fallback"?}}`。纯函数校验层（可单测）：`resolve_stock` / `parse_date` / `normalize_date_range` / `normalize_adj` / `normalize_period`。
+`MCPToolProvider`（`mcp.py`）经 `mcp_tool_provider(url, timeout, retries)` 连接服务端；`list_tools` 自动发现并一次性打印工具清单；`call_tool` 的 `read_timeout_seconds` 是 **`timedelta` 不是秒**。取数结果约定 `{code, msg, row_count, data}`：`code!=0`（权限/积分不足、接口下线）为**业务结果** → 友好 `is_error=False` 让 LLM 转述；真正的传输/异常才 `is_error=True`。重试语义（`DEMO_MCP_RETRIES` 次、退避 `min(0.5*2**attempt, 2.0)`）同时适用异常与业务失败。
 
 ### 8.3 llm/deepseek.py（`DeepSeekLLMClient`）
 
@@ -283,10 +275,9 @@ flowchart LR
 | 组 | 变量（默认值） |
 |---|---|
 | LLM | `DS_API_KEY`、`DS_BASE_URL`(api.deepseek.com)、`DS_MODEL`(deepseek-chat)、`DS_STREAMING`(true)、`DS_MAX_TOKENS`(8192) |
-| Agent | `DEMO_SYSTEM_PROMPT`(内置双票金融 prompt：4 语义工具+qfq+如实转述)、`DEMO_MAX_ITERATIONS`(10，**无读取者**)、`DISCLAIMER` |
+| Agent | `DEMO_SYSTEM_PROMPT`(内置全量金融 prompt：任意 A 股/全量接口 list_apis→get_api_info→query)、`DEMO_MAX_ITERATIONS`(10，**无读取者**)、`DISCLAIMER` |
 | DB | `DEMO_DATABASE_URL`(空→`sqlite+aiosqlite:///{PROJECT_ROOT/demo.db}`；也支持 mysql/asyncmy、postgres/asyncpg) |
 | MCP | `TUSHARE_MCP_URL`(api.tushare.pro/mcp/)、`DEMO_MCP_TIMEOUT`(30s)、`DEMO_MCP_RETRIES`(2) |
-| 语义工具 | `DEMO_STOCKS`(002594.SZ,300750.SZ)、`STOCK_DEFAULT_ADJ`(qfq)、`STOCK_FINANCIAL_PERIODS`(8) |
 | RAG（核心） | `RAG_USE_REAL`(false)、`RAG_VECTOR_STORE_PATH`(root/data/vectorstore)、`RAG_CORPUS_DIR`(空=不自动摄取)、`RAG_HTTP_URL`/`RAG_HTTP_TIMEOUT`(20)/`RAG_HTTP_TOKEN`、`RAG_TOP_K`(5)、`RAG_EMBEDDING_MODEL`(BAAI/bge-m3) |
 | mcp_server（后备） | `MCP_SERVER_HOST`(127.0.0.1)/`MCP_SERVER_PORT`(8765)、`TUSHARE_PROXY_URL`(http://127.0.0.1:8000)、`TUSHARE_API_KEY`、`TUSHARE_PROXY_TIMEOUT` |
 
@@ -328,7 +319,7 @@ flowchart LR
 
 ### 14.2 数据流示例（「比亚迪最近一个月日线」）
 
-router（market）→ rewrite_query（改写但不强制 RAG）→ tool_rag（`_should_rag` 对 market 跳过检索；LLM 选 `stock_price_range`，`resolve_stock` 命 002594.SZ，日期归一化近 30 天，`adj=qfq`）→ 工具返回 `{ok, data, source:{api:[...],adj:qfq}}` → 进 evidence（`source_type=stock_price_range`，`params` 并入 request_params）→ synthesizer 流式中文回答（含免责声明）→ `end_turn`+structured → web 三写落库。若工具取数抛 `StockFetchError` → `is_error=True` 且无其它证据 → `no_evidence` → fallback 文案。
+router（market）→ rewrite_query（改写但不强制 RAG）→ tool_rag（`_should_rag` 对 market 跳过检索；LLM 选 `query`/行情接口工具，`ts_code=002594.SZ`、日期近 30 天）→ 工具返回 `{code,msg,row_count,data}` → 进 evidence（`source_type`＝工具名，`params` 并入 request_params）→ synthesizer 流式中文回答（含免责声明）→ `end_turn`+structured → web 三写落库。若取数抛真异常 → `is_error=True` 且无其它证据 → `no_evidence` → fallback 文案。
 
 ### 14.3 旧版已删除的声明（迁移速查）
 

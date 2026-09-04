@@ -42,7 +42,7 @@ flowchart LR
 - **`market` 意图跳过 RAG**（`_should_rag`：`(intent or "market") != "market"` 才检索）：纯行情/指标问题是工具的事。
 - **RetrievalPlan 构造**（`nodes.py::_rag_retrieve`）：
   - `rewritten_query = state.rewritten_query or original_query`（`rewrite_query` 节点的产出，失败有确定性降级）；
-  - `concepts = extract_concepts(q)`、`filters = infer_filters(q)`（硬编码别名表：比亚迪/宁德时代 → `RagFilters{company, year}`，**在线路径过滤生效**）；
+  - `concepts = extract_concepts(q)`、`filters = infer_filters(q)`（RAG 语料域别名表：仅比亚迪/宁德时代 → `RagFilters{company, year}`，**在线路径过滤生效**；注：此表只管年报 RAG 语料，agent 取数面已放开为任意 A 股，见 ARCHITECTURE.md §8.2）；
   - `strategy = _strategy(intent)`：`report→factual`、`compare→structural`、其它→`auto`；
   - 检索异常 → `[]`（不崩图），图内只丢 RAG 证据。
 
@@ -220,7 +220,7 @@ flowchart TD
 4. **hyDE off**；`RAG_SCORE_THRESHOLD` 未读。
 5. **`rag/retriever.py` NullRetriever**：遗留占位、无引用。
 6. **`GraphState.retrieval_plan`**：声明但从未写入（实际计划是 `_rag_retrieve` 内局部 `RetrievalPlan`）。
-7. **`RagFilters` 依赖 `infer_filters` 别名表**：只认比亚迪/宁德时代；其它公司名不会生成过滤（严格模式仅在有维度时生效）。
+7. **`RagFilters` 依赖 `infer_filters` 别名表**：只认比亚迪/宁德时代（RAG 语料域）；其它公司名不会生成过滤（严格模式仅在有维度时生效）。注意这与 agent 取数面无关——取数已放开为任意 A 股。
 8. **无 key/无 rag-full 退化**：图片跳过、重排 Noop、嵌入 hashing —— 检索质量下降但**不报错**。
 9. **库 schema 变更无 ALTER**：`create_all` 不迁移既有表。
 
@@ -234,7 +234,7 @@ flowchart TD
 
 1. `router`：intent=`report` → 走 `rewrite_query`。
 2. `rewrite_query`：LLM 改写为「比亚迪 2025 年年度报告 研发投入 研发费用」；`filters=infer_filters` → `{company: 比亚迪, year: 2025}`。
-3. `tool_rag`：LLM 选 `stock_financials`（同时并行发起）；`_rag_retrieve` 构造 `RetrievalPlan(strategy="factual")` → 只走块稠密路 → RRF → `doc_id` 聚合 → 重排 → 阈值 0.2 → top 5。
+3. `tool_rag`：LLM 经 `query`/财报接口工具取数（同时并行发起）；`_rag_retrieve` 构造 `RetrievalPlan(strategy="factual")` → 只走块稠密路 → RRF → `doc_id` 聚合 → 重排 → 阈值 0.2 → top 5。
 4. 工具返回财报指标（证据 1），RAG 返回年报研发投入段落（证据 2，`cite=[比亚迪·2025年报 - 第42页 研发投入]`）。
 5. `synthesizer`：`_evidence_digest`（两条 `[i] 【marker】` + `请求参数=`）→ 流式回答：先给研发费用数值（表格/指标），再引年报原文；结尾免责声明。
 6. `AgentResult` → web：`append` + `append_turn` + `append_turn_data`（structured 含 sources/citations/claims/metadata）；前端渲染引用溯源卡。

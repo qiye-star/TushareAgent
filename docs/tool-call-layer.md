@@ -1,8 +1,11 @@
 # 工具调用层设计：限定「比亚迪 / 宁德时代」双票数据助手
 
-> 本文档为 **设计文档**，描述 demo-mcp 新增的**客户端语义工具调用层**。它把底层 MCP 取数能力打包成一组**针对两家上市公司**的高级语义工具，并在其上加**参数校验与容错**（代码自动补全、日期格式容错等）。
+> ## ⚠️ 已废弃 / 已被绕过（2026-09）
+> 本文描述的客户端**语义工具层**（`StockToolProvider`，`demomcp/providers/tools/stocks.py`）已**整体移除**——它用硬允许列表把数据面限定为比亚迪/宁德时代、只暴露 4 个语义工具。现 demo-mcp **直接使用原始 `MCPToolProvider`** 作为 `Agent` 的 `tools`，LLM 看到服务端暴露的全部工具（`list_apis` / `get_api_info` / `query` + 各接口工具），可查**任意 A 股 / 任意接口**。`stocks.py`、`tests/test_stock_provider.py`、`tests/test_stock_input.py` 与 `DEMO_STOCKS`/`STOCK_*` 配置均已删除。本文仅作**历史背景**留存，请勿据此扩展工具层。
+
+> ~~本文档为 **设计文档**，描述 demo-mcp 新增的**客户端语义工具调用层**。它把底层 MCP 取数能力打包成一组**针对两家上市公司**的高级语义工具，并在其上加**参数校验与容错**（代码自动补全、日期格式容错等）。~~
 >
-> **实现状态**：该层已按本文设计落地（`demomcp/providers/tools/stocks.py` `StockToolProvider`），与代码冲突处以代码为准。
+> ~~**实现状态**：该层已按本文设计落地（`demomcp/providers/tools/stocks.py` `StockToolProvider`），与代码冲突处以代码为准。~~
 
 ---
 

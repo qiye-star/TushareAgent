@@ -10,12 +10,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from demomcp.config.env import PROJECT_ROOT
 
 DEFAULT_SYSTEM_PROMPT = (
-    "你是面向比亚迪(002594.SZ)、宁德时代(300750.SZ)两家上市公司的金融数据助手。"
-    "只能使用提供给你的语义工具：stock_available / stock_realtime_quote / stock_price_range / stock_financials。"
-    "标的用公司名/代码/别名皆可；日期支持多种格式与相对词（如 2026-08-01、20260801、近一年、今天）；"
-    "区间涨跌幅默认前复权(qfq)。不确定可选公司时可先调 stock_available 确认。"
-    "取到数据后总结成简洁中文，必要时给出关键数字；若工具返回无数据、区间交易日不足或权限/积分不足，"
-    "如实转述给用户并说明，而不是编造数字。"
+    "你是面向 A 股市场的金融数据助手，可查询任意上交所/深交所上市公司、指数及其它金融数据。"
+    "先用 list_apis 按关键词浏览可用接口，再用 get_api_info 查看某接口的必填/可选参数与返回列，"
+    "然后调用 query(api_name, params, fields) 或对应接口工具取数。"
+    "标的用合法 ts_code（如 600519.SH、000001.SZ）；不确定代码时可借助 stock_basic 等接口查询。"
+    "日期支持多种格式与相对词（如 2026-08-01、20260801、近一年、今天）；区间行情默认前复权(qfq)。"
+    "工具返回 {code, msg, row_count, data}，code 非 0（如权限/积分不足、接口下线）是业务结果而非崩溃，"
+    "请如实转述 msg 给用户并说明，而不是编造数字；取到数据后总结成简洁中文，必要时给出关键数字。"
 )
 
 DEFAULT_DISCLAIMER = "以上内容基于公开数据整理，仅供研究参考，不构成投资建议。"
@@ -57,11 +58,6 @@ class Settings(BaseSettings):
     tushare_mcp_url: str = "https://api.tushare.pro/mcp/"  # TUSHARE_MCP_URL（.env 提供 https://api.tushare.pro/mcp/?token=...）
     mcp_timeout: float = Field(default=30.0, alias="DEMO_MCP_TIMEOUT")   # 单次工具调用读超时（秒）
     mcp_retries: int = Field(default=2, alias="DEMO_MCP_RETRIES")        # 工具调用重试次数
-
-    # 语义工具层（双票限定）
-    stock_allowlist: str = Field(default="002594.SZ,300750.SZ", alias="DEMO_STOCKS")  # 硬 allowlist（逗号分隔 ts_code）
-    stock_default_adj: str = Field(default="qfq", alias="STOCK_DEFAULT_ADJ")           # 区间涨跌幅默认复权口径
-    stock_financial_periods: int = Field(default=8, alias="STOCK_FINANCIAL_PERIODS")   # 财务默认期数（近 2 年 = 8 期）
 
     # RAG 财报知识库（离线优先：默认纯 Python；RAG_USE_REAL=true 且安装 rag-full 才加载真实后端）
     rag_use_real: bool = Field(default=False, alias="RAG_USE_REAL")                 # 是否走真实后端（bge-m3/faiss/pymupdf）
