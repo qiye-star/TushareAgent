@@ -9,10 +9,18 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import httpx
 from openai import AsyncOpenAI
 
 from demomcp.interfaces.llm_client import OnText, OnThinking
 from demomcp.interfaces.types import ChatResponse, ToolResult, ToolSpec, ToolUse
+
+# 显式收紧 openai SDK 超时：其默认读超时高达 600s，egress 抖动/半开连接时会把整轮对话
+# 挂成「前端无限转圈」。这里按段给限：连接 10s / 读 180s（reasoner 非流式节点可能长思考，留足余量）；
+# 关掉 SDK 自带重试（默认 2 次会把每次 180s 读超时叠成 ~9min 的静默），LLM 层失败即抛、
+# 交给 web 层 SSE 看门狗/用户重试兜底。
+_LLM_TIMEOUT = httpx.Timeout(connect=10.0, read=180.0, write=60.0, pool=10.0)
+_LLM_MAX_RETRIES = 0
 
 
 def to_openai_tool(spec: ToolSpec) -> dict[str, Any]:
@@ -39,7 +47,9 @@ def map_finish(finish_reason: str | None, has_tool_calls: bool) -> str:
 
 class DeepSeekLLMClient:
     def __init__(self, *, api_key: str, base_url: str | None = None, model: str | None = None) -> None:
-        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self._client = AsyncOpenAI(
+            api_key=api_key, base_url=base_url, timeout=_LLM_TIMEOUT, max_retries=_LLM_MAX_RETRIES
+        )
         self._model = model or "deepseek-chat"
 
     async def chat(

@@ -137,5 +137,18 @@ class ChatHistoryStore:
 
 
 def build_store(database_url: str) -> ChatHistoryStore:
-    """按 DEMO_DATABASE_URL 建 store（默认 SQLite / DSN 自动驱动）。"""
-    return ChatHistoryStore(create_async_engine(database_url))
+    """按 DEMO_DATABASE_URL 建 store（默认 SQLite / DSN 自动驱动）。
+
+    连接池健康参数针对远程库：半开/陈旧连接（NAT 掐线、远端重启）会在 checkout 上把整轮请求
+    挂住。`pool_pre_ping` 取出前先验活、`pool_recycle` 定期回收、`pool_timeout` 不让取连接
+    无限等待；Postgres（asyncpg）再补 `command_timeout` 给每条语句硬上限（含 pre_ping 的 SELECT 1）。
+    """
+    engine_kwargs: dict[str, Any] = {
+        "pool_pre_ping": True,
+        "pool_recycle": 1800,
+        "pool_timeout": 10,
+    }
+    if database_url.startswith("postgresql"):
+        # connect_args 只对 asyncpg 生效；SQLite/测试库不传，避免驱动不认该参数。
+        engine_kwargs["connect_args"] = {"command_timeout": 30}
+    return ChatHistoryStore(create_async_engine(database_url, **engine_kwargs))

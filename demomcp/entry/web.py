@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -34,6 +35,12 @@ from demomcp.rag.schemas import RetrievalPlan
 # React 前端构建产物输出到 scripts/web/dist（见 scripts/web/vite.config.ts 的 build.outDir）。
 # 开发时用 `cd scripts/web && npm run dev`（Vite 代理到本服务）；生产由本静态挂载同源服务 dist。
 WEB_DIR = Path(__file__).resolve().parents[2] / "scripts" / "web" / "dist"
+
+# Agent 每轮可容忍的「完全静默」上限：超过即视为卡死（外部调用可能在 asyncio 层绕过自身超时，
+# 导致 queue 再无事件、task.cancel() 兜底也走不到）。到点就 cancel 并发 error/__end__，
+# 保证 SSE 一定收敛、前端不再无限转圈。须大于单次 LLM 最长静默（deepseek.py 读超时 180s + 余量），
+# 避免误杀正常长思考（deepseek-reasoner 非流式节点可能长时间无事件）。
+AGENT_IDLE_TIMEOUT = 240.0
 
 
 @asynccontextmanager
@@ -66,11 +73,26 @@ def _sse(kind: str, data: dict[str, Any]) -> str:
     return f"event: {kind}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+async def _settle(task: asyncio.Task[Any]) -> None:
+    """给已 cancel 的任务一段退出时间（跑 __aexit__ 释放连接）；不给无限时间，它自己也可能是卡源。"""
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
+    except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - best-effort 收尾，清理期异常不阻断 SSE 收敛
+        logger.debug("agent 取消后未在 5s 内完全退出: %r", exc)
+
+
 @app.post("/chat")
 async def chat(req: ChatRequest) -> StreamingResponse:
     store: ChatHistoryStore = app.state.store
     settings: Settings = app.state.settings
     session_id = req.session_id or uuid.uuid4().hex
+    started = time.monotonic()
+    logger.info(
+        "chat start session=%s model=%s q=%.80s",
+        session_id,
+        req.model or settings.ds_model,
+        req.message,
+    )
     history = await store.last_turn_messages(session_id) or []
     await store.append(session_id, "user", req.message)
 
@@ -174,13 +196,32 @@ async def chat(req: ChatRequest) -> StreamingResponse:
 
     async def stream() -> AsyncIterator[str]:
         task = asyncio.create_task(_run_agent())
+        reason: str | None = None
         try:
             while True:
-                kind, data = await queue.get()
+                try:
+                    kind, data = await asyncio.wait_for(queue.get(), timeout=AGENT_IDLE_TIMEOUT)
+                except TimeoutError:
+                    # agent 静默超时：外部调用卡死且绕过了自身超时 → 掐掉本轮，SSE 收敛成错误，不再无限转圈。
+                    task.cancel()
+                    await _settle(task)
+                    reason = "timeout"
+                    yield _sse("error", {"message": "Agent 长时间无进展，本轮已中止，请重试。"})
+                    yield _sse("__end__", {})
+                    return
                 if kind == "__end__":
+                    reason = "done"
                     break
                 yield _sse(kind, data)
         finally:
+            elapsed = time.monotonic() - started
+            if reason == "timeout":
+                logger.warning("chat end session=%s reason=timeout elapsed=%.1fs", session_id, elapsed)
+            elif reason == "done":
+                logger.info("chat end session=%s reason=done elapsed=%.1fs", session_id, elapsed)
+            else:
+                # 未走完 done/timeout（客户端断连或流内异常）也留痕，便于定位卡死/中断请求
+                logger.info("chat end session=%s reason=aborted elapsed=%.1fs", session_id, elapsed)
             task.cancel()
 
     return StreamingResponse(stream(), media_type="text/event-stream")
