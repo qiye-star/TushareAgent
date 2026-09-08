@@ -23,7 +23,13 @@ from demomcp.graph.state import GraphState
 from demomcp.graph.tool_select import select_tools
 from demomcp.interfaces.llm_client import LLMClient
 from demomcp.interfaces.tool_provider import ToolProvider
-from demomcp.interfaces.types import META_TOOL_NAMES, AgentResult
+from demomcp.interfaces.types import (
+    FREE_SOURCE_SENTINELS,
+    IFIND_TOOL_PREFIX,
+    META_TOOL_NAMES,
+    WIND_TOOL_PREFIX,
+    AgentResult,
+)
 
 _log = get_logger("agents")
 
@@ -36,12 +42,8 @@ QUICK_MODE_SUFFIX = (
 )
 
 
-WIND_TOOL_PREFIX = "wind_"
-IFIND_TOOL_PREFIX = "ifind_"
-
-# 免费源（AkShare / 财经新闻）的工具名**没有前缀**，只能按哨兵名判断在不在本轮清单里。
-# 挑的是这两个源独有、且不与 Tushare 官方接口名撞车的名字（Tushare 那边是 daily/stock_basic 这类）。
-FREE_SOURCE_SENTINELS = frozenset({"get_market_overview", "get_market_headlines", "search_stock"})
+# 源命名常量已上移到 `interfaces/types.py`（quickreport 侧的信封判定要用同一份，
+# 两处各写一份必然漂移）。这里 re-export 以保持既有 import 路径可用。
 
 
 def base_system_for(cfg: Settings, tool_defs: list[Any]) -> str:

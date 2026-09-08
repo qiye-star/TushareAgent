@@ -73,3 +73,39 @@ class AgentResult:
     citations: list[str] = field(default_factory=list)
     structured: dict[str, Any] | None = None
     mode: str = "agent"  # "agent" | "quick"；Agent.run() 按调用时的 mode 打上，标记这轮产出方式
+
+
+# ---------------------------------------------------------------------------
+# 上游源的工具名空间（跨层常量：agents 侧注入用法提示词、quickreport 侧判定信封）
+# ---------------------------------------------------------------------------
+# 网关把五个源聚合到一条 MCP 连接上，协议里**不带 source_id**（`mcp_gateway/pool.py::_name_to_source`
+# 是网关进程私有状态）。下游想知道「这个工具是哪家的」，只能按工具名判断——所以这三个常量必须
+# 是全仓唯一一份：`agents/agent.py::base_system_for` 靠它决定注入哪段用法约定，
+# `quickreport/source.py::source_kind` 靠它决定用哪套成功码判定信封。两处漂移就会各自出错。
+WIND_TOOL_PREFIX = "wind_"
+IFIND_TOOL_PREFIX = "ifind_"
+
+# 免费源（external_sources/*.py）的工具名**没有前缀**，只能按名字集合判断。
+# 全集 = akshare_server.py 的 9 个 + china_news_server.py 的 2 个；
+# 改那两个文件的工具面时**必须同步这里**（漏了会让该工具被当成 Tushare 接口、按 code!=0 判失败）。
+FREE_SOURCE_TOOLS: frozenset[str] = frozenset(
+    {
+        # akshare_server.py
+        "search_stock",
+        "get_quote",
+        "get_historical_data",
+        "get_financials",
+        "get_industry_stocks",
+        "get_index_data",
+        "get_stock_info",
+        "get_market_overview",
+        "get_fund_data",
+        # china_news_server.py
+        "get_stock_news",
+        "get_market_headlines",
+    }
+)
+
+# 历史名（agent.py 的哨兵语义）：判断「本轮工具清单里有没有免费源」用的是同一个全集。
+# 保留别名是为了不改 agent.py 里那行可读的 `FREE_SOURCE_SENTINELS.intersection(names)`。
+FREE_SOURCE_SENTINELS = FREE_SOURCE_TOOLS

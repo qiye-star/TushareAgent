@@ -35,6 +35,12 @@ from demomcp.quickreport.projection import (
     project_forecast,
     project_news,
 )
+from demomcp.quickreport.source import (
+    KIND_FREE,
+    KIND_IFIND,
+    KIND_TUSHARE,
+    source_kind,
+)
 
 _PERMISSION_WORDS = ("积分", "权限", "无权限", "提升", "需提高", "需提升", "points")
 _BATCH = 30  # 公告/预告逗号批量上限
@@ -78,15 +84,20 @@ async def _call(
     if result.is_error:
         ctx.error(stage, tool, "工具返回错误")
         return None
-    reason = _biz_fail_reason(result.content)
+    reason = _biz_fail_reason(result.content, source_kind(tool))
     if reason is not None:
         ctx.error(stage, tool, reason)
         return None
     return result.content
 
 
-def _biz_fail_reason(content: str) -> str | None:
-    """Tushare 信封业务失败（code 非 0）→ 失败原因（权限类带「权限受限」前缀）；否则 None。
+def _biz_fail_reason(content: str, kind: str = KIND_TUSHARE) -> str | None:
+    """信封业务失败 → 失败原因（权限类带「权限受限」前缀）；成功 → None。
+
+    `kind` 缺省 `tushare`，**单参调用的行为与改造前逐字节一致**（`code != 0` 即失败，
+    含被 test_biz_fail_reason_classification 锁定的 `{"code": 1}` → 「业务失败：code 非 0」）。
+    加这个形参而不是改判据本身，就是因为那条断言：Tushare 语义下 code:1 确实是失败，
+    而 iFind 语义下 code:1 恰恰是成功——同一段文本的含义取决于它来自哪个源。
 
     另识别 **非 JSON 封装失败文本**（实测 2026-09-05）：mcp.py 把权限类失败归一为一句话
     「调用 {name} 失败：该接口需更高积分或当前账号无权限（代理提示：…）」且 is_error=False——
@@ -94,14 +105,38 @@ def _biz_fail_reason(content: str) -> str | None:
     """
     body = _parse_json_dict(content)
     if body is not None:
-        code = body.get("code")
-        if code in (None, 0, "0"):
+        # 免费源/代理层的失败形状，**与源无关、必须先判**：`_extract_rows` 的信封探测只认
+        # ("code","msg","ok","row_count","rowcount")，`error` 不在其中 → 它会把 {"error": …}
+        # 当成**一行数据**返回（tracker_render.py:42-44 实测）。不在这里拦掉，硬失败就会
+        # 被误报成 empty（甚至让 `_is_usable` 为真、把错误字典当数据渲染出去）。
+        err = body.get("error")
+        if err:
+            return f"取数失败：{str(err)[:80]}"
+        if kind == KIND_IFIND:
+            # iFind 成功码是 1（见 mcp_gateway/providers/ifind.py::_SUCCESS_CODE）。
+            # 「查不到数据」也仍是 code:1（提示语在 data 里）→ 不算失败，交给解包器判空。
+            return _code_fail(body, ok=(None, 1, "1"))
+        if kind == KIND_FREE:
+            # 免费源没有 code 约定，失败只体现为上面的 error 键。
             return None
-        msg = str(body.get("msg") or body.get("message") or "")
-        if any(k in msg for k in _PERMISSION_WORDS):
-            return f"权限受限：{msg or '积分不足'}"
-        return f"业务失败：{msg or 'code 非 0'}"
-    # 非 JSON 失败特征文本（mcp 层友好提示 / Error calling 兜底 / 「抱歉，您没有接口」）
+        # tushare / wind：wind 没有 code 字段（缺失即成功），tushare 是 code:0 成功。
+        return _code_fail(body, ok=(None, 0, "0"))
+    return _text_fail_reason(content)
+
+
+def _code_fail(body: dict[str, Any], *, ok: tuple[Any, ...]) -> str | None:
+    """按该源的成功码集合判定信封；失败则给出原因文案。"""
+    code = body.get("code")
+    if code in ok:
+        return None
+    msg = str(body.get("msg") or body.get("message") or body.get("subMsg") or "")
+    if any(k in msg for k in _PERMISSION_WORDS):
+        return f"权限受限：{msg or '积分不足'}"
+    return f"业务失败：{msg or 'code 非 0'}"
+
+
+def _text_fail_reason(content: str) -> str | None:
+    """非 JSON 失败特征文本（mcp 层友好提示 / Error calling 兜底 / 「抱歉，您没有接口」）。"""
     if content.startswith("调用") and "失败" in content:
         return "权限受限：" + content[:80]
     if "Error calling" in content or "抱歉，您没有接口" in content:
