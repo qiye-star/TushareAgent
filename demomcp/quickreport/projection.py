@@ -63,15 +63,25 @@ def _pct_proj(row: dict[str, Any]) -> dict[str, Any]:
     return {"pct": pct, "pct_text": _fmt_pct(pct) if pct is not None else None}
 
 
-def _flow_yi(v: Any) -> float | None:
-    """板块/个股资金流净额（**万元**）→ 亿元：/1e4（不用 tracker_render._yi_num 的
-    「>=1000 视为万元」启发式——小额流入会被误当亿元，量级错 1 万倍；管线数据源自控，明确换算）。"""
+def flow_to_yi(v: Any, *, max_yi: float = 100.0) -> float | None:
+    """资金流净额（**万元**）→ 亿元：/1e4。**全模块唯一一份换算**（pipeline 也 import 它）。
+
+    不用 tracker_render._yi_num 的「>=1000 视为万元」启发式——小额流入会被误当亿元，
+    量级错 1 万倍（实测：光庭信息净流入 993.99 万 → 误报 993.99 亿）；管线数据源自控，明确换算。
+
+    `max_yi` 是**单条**记录的合理性上界（默认 100 亿）：超界视为单位错乱而丢弃，
+    宁可标未接入也不误导。这是逐条守卫——池级合计刻意不设上界（丢掉真实的大额净流入
+    比标出来更糟），合计的可疑判定见 `pipeline._pool_inflow_sum` 的 `suspect` 字段。
+    """
     n = _num(v)
     if n is None:
         return None
-    if abs(n) > 1e6:  # 单日净流入超 100 亿不可能是真的，弃（宁可标未接入）
+    if abs(n) > max_yi * 1e4:
         return None
     return round(n / 1e4, 4)
+
+
+_flow_yi = flow_to_yi  # 模块内既有调用点沿用短名
 
 
 def project_board(rows: list[dict[str, Any]], limit: int = 20) -> dict[str, Any]:
@@ -97,7 +107,10 @@ def project_board(rows: list[dict[str, Any]], limit: int = 20) -> dict[str, Any]
         out.append(row)
         if inflow is not None:
             inflow_rows.append(row)
-    inflow_rows.sort(key=lambda x: (x["inflow"] or float("-inf")), reverse=True)
+    # 只有非 None 的行会进 inflow_rows（上面有 `if inflow is not None` 守卫），直接取值排序。
+    # 原写法 `x["inflow"] or float("-inf")` 会把 **0.0**（falsy）当成 -inf，
+    # 排到 -50 亿之后——真实的排序错误。
+    inflow_rows.sort(key=lambda x: x["inflow"], reverse=True)
     top_inflow = [
         {"rank": i + 1, "name": x["name"], "inflow": x["inflow"], "inflow_text": x["inflow_text"]}
         for i, x in enumerate(inflow_rows[:5])
@@ -117,33 +130,49 @@ def join_watchlist(
     - pct/close 来自 T-1 daily；week_pct = (close_t - close_t5)/close_t5*100（T-1 与 T-6 交易日收盘）；
     - turnover_rate 来自 daily_basic；market_cap = total_mv(万元) / 1e4 → 亿元；
     - 池子里在 daily_rows 无行的计为 missing_codes（诚实透传，不编造）。
+
+    返回里 `rows` 按 `display_limit` 截断供前端展示，另回传 `_all_rows`（**未截断**）
+    与 `stats`（全池口径统计）。前缀 `_` 的键会被 `pipeline.build_report` 剥掉、不进 JSON 契约。
+    这不是可选的便利：`build_brief` 与 KPI 指标行若拿截断后的 rows 统计，
+    「标的池 N 涨 M 跌」「涨幅居前」就只覆盖了池子的前 `display_limit` 只
+    （实测 211 只的池子里只统计了前 100 只，且是按 watchlist.json 原始顺序而非涨跌幅排序，
+    第 101~211 只里的涨停不会被提及）。
+
+    索引优先：三份快照都是**全市场**（实测约 5400 行），逐个池内代码做 `next(...)` 线性扫
+    会是 211 × 5400 × 2 ≈ 230 万次比较。先建 dict 索引（first-wins），降到一次线性 + 常数查找。
     """
-    cur: dict[str, dict[str, Any]] = {}
+    daily_by_code: dict[str, dict[str, Any]] = {}
     for r in daily_rows:
         code = _code_of(r)
-        if code in names_by_code:
-            cur[code] = {"close": _num(_get(r, *_CLOSE))}
-    prev: dict[str, float | None] = {}
+        # first-wins：与原 `next(...)` 的语义一致（原 `cur` 是 last-wins、`next` 是 first-wins，
+        # 两者对同一行取值本应一致——快照里代码唯一，此处统一成一份、让 close 与 pct 必然同源）
+        if code in names_by_code and code not in daily_by_code:
+            daily_by_code[code] = r
+    prev_close_by_code: dict[str, float | None] = {}
     for r in prev_rows:
         code = _code_of(r)
-        if code in names_by_code:
-            prev[code] = _num(_get(r, *_CLOSE))
+        if code in names_by_code and code not in prev_close_by_code:
+            prev_close_by_code[code] = _num(_get(r, *_CLOSE))
+    basic_by_code: dict[str, dict[str, Any]] = {}
+    for r in basic_rows:
+        code = _code_of(r)
+        if code in names_by_code and code not in basic_by_code:
+            basic_by_code[code] = r
 
     rows: list[dict[str, Any]] = []
     missing = 0
     for code, name in names_by_code.items():
-        c = cur.get(code)
-        if c is None:
+        day_row = daily_by_code.get(code)
+        if day_row is None:
             missing += 1
             continue
-        day_meta = next((r for r in daily_rows if _code_of(r) == code), None)
-        pct = _num(_get(day_meta, *_PCT)) if day_meta is not None else None
-        close = c["close"]
-        prev_close = prev.get(code)
+        close = _num(_get(day_row, *_CLOSE))
+        pct = _num(_get(day_row, *_PCT))
+        prev_close = prev_close_by_code.get(code)
         week_pct = None
         if close is not None and prev_close not in (None, 0):
             week_pct = round((close - prev_close) / prev_close * 100, 4)
-        basic = next((r for r in basic_rows if _code_of(r) == code), None)
+        basic = basic_by_code.get(code)
         turnover = _num(_get(basic, "turnover_rate")) if basic is not None else None
         total_mv = _num(_get(basic, "total_mv")) if basic is not None else None
         market_cap = round(total_mv / 1e4, 2) if total_mv is not None else None
@@ -173,6 +202,30 @@ def join_watchlist(
         "truncated": truncated,
         "total_count": total,
         "missing_codes": missing,
+        "stats": pool_stats(rows),
+        "_all_rows": rows,
+    }
+
+
+def pool_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """全池涨跌统计（**必须传未截断的行**）：涨/跌/平家数、均值、中位数、参与统计的只数。
+
+    只统计 `pct` 为数值的行；`computed_over` 让前端能诚实标注口径
+    （旧报文没有这个字段时前端会退回自算，那就只有 display_limit 那部分，必须标「样本」）。
+    """
+    pcts = [r["pct"] for r in rows if isinstance(r.get("pct"), (int, float))]
+    if not pcts:
+        return {"up": 0, "down": 0, "flat": 0, "avg_pct": None, "median_pct": None, "computed_over": 0}
+    ordered = sorted(pcts)
+    mid = len(ordered) // 2
+    median = ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2
+    return {
+        "up": sum(1 for x in pcts if x > 0),
+        "down": sum(1 for x in pcts if x < 0),
+        "flat": sum(1 for x in pcts if x == 0),
+        "avg_pct": round(sum(pcts) / len(pcts), 4),
+        "median_pct": round(median, 4),
+        "computed_over": len(pcts),
     }
 
 

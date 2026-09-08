@@ -343,9 +343,9 @@ def test_pool_inflow_sum(tmp_path) -> None:
         {"ts_code": "300394.SZ", "net_mf_amount": -5000},  # -0.5 亿
         {"ts_code": "999999.SZ", "net_mf_amount": 100000},  # 不在池内，忽略
     ])
-    assert _pool_inflow_sum(content, cfg, names) == 2.7
-    assert _pool_inflow_sum(None, cfg, names) is None
-    assert _pool_inflow_sum(_ok([]), cfg, names) is None
+    assert _pool_inflow_sum(content, names)["value"] == 2.7
+    assert _pool_inflow_sum(None, names)["value"] is None
+    assert _pool_inflow_sum(_ok([]), names)["value"] is None
 
 
 async def test_forecast_batch_gate_is_pool_filtered_not_market(tmp_path) -> None:
@@ -381,3 +381,43 @@ async def test_watchlist_daily_failure_is_na_not_empty(tmp_path) -> None:
     report = await build_report(FakeTools(handlers), _cfg(tmp_path), report_date="20260904", stage_timeout=20.0)
     assert report["watchlist"]["status"] == "na"
     assert "watchlist" in report["missing"]
+
+
+def test_pool_inflow_sum_is_auditable_and_flags_incomplete(tmp_path) -> None:
+    """池合计可审计：count/dropped/incomplete。
+
+    刻意没有「合计超 N 亿即可疑」的判定——实测 211 只标的的池子在普涨日合计 262 亿完全正常，
+    任何这类阈值都会在正常日误报。`incomplete` 只陈述事实：确实有行被守卫丢掉、合计因此偏低。
+    """
+    cfg = _cfg(tmp_path)
+    names = {s.ts_code: s.name for s in cfg.watchlist}
+    clean = _ok([
+        {"ts_code": "300502.SZ", "net_mf_amount": 32000},
+        {"ts_code": "300394.SZ", "net_mf_amount": -5000},
+    ])
+    out = _pool_inflow_sum(clean, names)
+    assert out["value"] == 2.7
+    assert (out["count"], out["dropped"], out["incomplete"]) == (2, 0, False)
+
+    # 单位错乱行（远超 100 亿上界）被丢弃 → 合计偏低，必须标 incomplete
+    dirty = _ok([
+        {"ts_code": "300502.SZ", "net_mf_amount": 32000},
+        {"ts_code": "300394.SZ", "net_mf_amount": 99999999999},
+    ])
+    out = _pool_inflow_sum(dirty, names)
+    assert out["value"] == 3.2
+    assert (out["count"], out["dropped"], out["incomplete"]) == (1, 1, True)
+
+
+def test_pool_inflow_sum_keeps_real_large_single_stock_inflow(tmp_path) -> None:
+    """65.48 亿（中际旭创 2026-09-07 实测）必须计入——它不是脏数据。
+
+    此前把逐条上界收紧到 50 亿时，这条真实的池内第一被当单位错乱丢掉，
+    池合计从 328 亿掉到 262 亿。「A 股没有单票单日破 50 亿」这个假设被实测推翻。
+    """
+    cfg = _cfg(tmp_path)
+    names = {s.ts_code: s.name for s in cfg.watchlist}
+    out = _pool_inflow_sum(_ok([{"ts_code": "300502.SZ", "net_mf_amount": 654819}]), names)
+    assert out["value"] == 65.4819
+    assert out["dropped"] == 0
+    assert out["incomplete"] is False

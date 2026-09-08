@@ -29,6 +29,7 @@ from demomcp.interfaces.tool_provider import ToolProvider
 from demomcp.quickreport.config import ConfigError, WatchlistConfig, cn_tz
 from demomcp.quickreport.projection import (
     build_brief,
+    flow_to_yi,
     join_watchlist,
     project_announce,
     project_board,
@@ -38,6 +39,7 @@ from demomcp.quickreport.projection import (
 from demomcp.quickreport.source import (
     KIND_FREE,
     KIND_IFIND,
+    KIND_PIPELINE,
     KIND_TUSHARE,
     source_kind,
 )
@@ -45,6 +47,11 @@ from demomcp.quickreport.source import (
 _PERMISSION_WORDS = ("积分", "权限", "无权限", "提升", "需提高", "需提升", "points")
 _BATCH = 30  # 公告/预告逗号批量上限
 _FLOW_CANDIDATES = ("moneyflow_ind_dc", "moneyflow_mkt_dc", "moneyflow_cnt_ths", "moneyflow_ind_ths")
+# 单只个股单日主力净流入的合理性上界（亿元）：超它视为单位错乱而丢弃。
+# 保持 100 亿，**不要收紧**：2026-09-08 实测把它调到 50 亿后，中际旭创当日
+# +10.38% 时的 65.48 亿真实净流入被当成脏数据丢掉了（它是当日池内第一），
+# 池合计也从 328 亿掉到 262 亿。「A 股没有单票单日破 50 亿」这个假设是错的。
+_MAX_STOCK_INFLOW_YI = 100.0
 
 
 class _Ctx:
@@ -54,10 +61,23 @@ class _Ctx:
         self.sem = sem
         self.stage_timeout = stage_timeout
         self.errors: list[dict[str, str]] = []
-        self.api_cache: dict[str, dict[str, Any] | None] = {}
 
-    def error(self, stage: str, tool: str, reason: str) -> None:
-        self.errors.append({"stage": stage, "tool": tool, "reason": reason})
+    def error(
+        self, stage: str, tool: str, reason: str, *, source: str | None = None
+    ) -> dict[str, str]:
+        """记一条错误并**返回它**——降级链把同一个 reason 引用进 section.attempts，不各写一份。
+
+        `source` 缺省按工具名推断；段级超时这类「不是某个源的错」显式传 KIND_PIPELINE，
+        否则一个叫 "announce" 的伪工具名会被误判成 Tushare 接口。
+        """
+        entry = {
+            "stage": stage,
+            "tool": tool,
+            "reason": reason,
+            "source": source or source_kind(tool),
+        }
+        self.errors.append(entry)
+        return entry
 
 
 # ---------------------------------------------------------------------------
@@ -228,24 +248,6 @@ async def _prev_trading_days(
         return []
 
 
-async def _api_info(tools: ToolProvider, ctx: _Ctx, api_name: str) -> dict[str, Any] | None:
-    """get_api_info 备忘（一次生成只查一次）：拿不到/解析失败/权限 → None（走默认参数兜底尝试）。"""
-    if ctx.api_cache.get(api_name, "missing") != "missing":
-        return ctx.api_cache[api_name]
-    content = await _call(tools, ctx, "get_api_info", {"api_name": api_name}, stage="meta")
-    info: dict[str, Any] | None = None
-    if content:
-        try:
-            import json
-
-            body = json.loads(content)
-            info = body if isinstance(body, dict) else None
-        except (ValueError, TypeError):
-            info = None
-    ctx.api_cache[api_name] = info
-    return info
-
-
 # ---------------------------------------------------------------------------
 # 各段取数（返回 (rows, chain_ok)：chain_ok=至少一次工具调用成功返回）
 # ---------------------------------------------------------------------------
@@ -288,13 +290,23 @@ async def _fetch_board(tools: ToolProvider, ctx: _Ctx, cfg: WatchlistConfig, day
             rows.append(row)
     if _is_usable(rows):
         return rows, chain_ok
-    # 环3 核心指数：index_basic（SSE+SZ 两表，实测 399006.SZ 在深市表）→ index_daily
+    # 环3 核心指数：index_basic（沪深两表）→ index_daily
     # 实测（2026-09-05）：上证/沪深300/中证500/创业板指/上证50 均有权且返回真实行情；
     # 申万行业指数（801010.SI）index_daily 返回空、sw_daily 40203 → 不作为环2 的兜底结果。
+    #
+    # 深市代码必须是 **SZSE**，不是 "SZ"（2026-09-08 实测）：
+    #   market="SSE"  → 208 行；market="SZ" → **0 行**；market="SZSE" → 485 行（含创业板指）
+    # 直查 index_basic{ts_code:"399006.SZ"} 确认其 market 字段真值就是 "SZSE"。
+    # 用 "SZ" 的后果是**静默**丢掉整个创业板指——它 2026-09-07 当日 +3.41%，
+    # 是六个宽基里最强的一个，而 errors 里不会有任何痕迹。
     basic_maps: dict[str, str] = {}
-    for market in ("SSE", "SZ"):
+    for market in ("SSE", "SZSE"):
         content = await _call(tools, ctx, "index_basic", {"market": market}, stage="board")
-        for r in _extract_rows(content):
+        market_rows = _extract_rows(content)
+        if content is not None and not market_rows:
+            # 不再静默：分类表取回空是「配置的指数可能整段查不到」的前兆，必须留痕
+            ctx.error("board", "index_basic", f"指数分类表 market={market} 返回 0 行")
+        for r in market_rows:
             code = str(_get(r, "ts_code") or "")
             name = str(_get(r, "name") or "")
             if code and name and name not in basic_maps:
@@ -302,6 +314,7 @@ async def _fetch_board(tools: ToolProvider, ctx: _Ctx, cfg: WatchlistConfig, day
     for idx_name in cfg.board.indexes:
         code = basic_maps.get(idx_name)
         if not code:
+            ctx.error("board", "index_basic", f"指数「{idx_name}」在分类表里未命中，本段跳过")
             continue
         r = await _call(tools, ctx, "index_daily", {"ts_code": code, "start_date": day, "end_date": day}, stage="board")
         if r is not None:
@@ -329,28 +342,9 @@ async def _fetch_board_flow(tools: ToolProvider, ctx: _Ctx, cfg: WatchlistConfig
         for r in _extract_rows(content):
             name = str(_get(r, "name") or _get(r, "板块名称") or "")
             if name and name not in merged:
-                merged[name] = _to_yi_num(_get(r, "net_amount"))
+                merged[name] = flow_to_yi(_get(r, "net_amount"))
         return merged
     return merged
-
-
-def _to_yi_num(v: Any) -> float | None:
-    """资金流净额（**万元**）→ 亿元：/1e4。
-
-    实测教训（2026-09-05 真实数据）：moneyflow.net_mf_amount / moneyflow_ind_dc.net_amount
-    均为万元；若沿用 tracker_render._yi_num 的「>=1000 视为万元」启发式，小额（<1000 万）
-    会被当成"已亿元"，量级错 4 倍（如光庭信息净流入 993.99万 → 误报 993.99亿）。
-    本管线数据源自控，直接用明确单位换算；异常大值（>1e6 万=100亿 ）视为脏数据丢弃。
-    """
-    if v is None or v == "":
-        return None
-    try:
-        n = float(str(v).replace(",", ""))
-    except (TypeError, ValueError):
-        return None
-    if abs(n) > 1e6:  # 单日主力净流入超 100 亿不可能是真的（单标的），弃
-        return None
-    return round(n / 1e4, 4)
 
 
 async def _fetch_watchlist(
@@ -612,14 +606,25 @@ async def build_report(
     except ValueError as exc:
         raise ConfigError(f"非法报告日期 {day!r}（应为 YYYYMMDD）：{exc}") from exc
 
-    async def stage(name: str, coro: Callable[[], Awaitable[tuple[Any, bool]]]) -> tuple[Any, bool]:
+    async def stage(
+        name: str,
+        coro: Callable[[], Awaitable[tuple[Any, bool]]],
+        *,
+        empty: Any,
+    ) -> tuple[Any, bool]:
+        """段级超时/异常 → (该段的空值, False)（CancelledError 不在此列，照常透传）。
+
+        `empty` 必须与该段正常返回的**类型一致**：行列表段传 `[]`、dict 段传 `{}`。
+        原先一律返回 `{}`，list 段拿到空 dict 只是「恰好」不炸（`for r in {}` 什么也不产、
+        `list({}) == []`），任何新增的切片/索引消费者都会崩在这里。
+        """
         try:
             return await asyncio.wait_for(coro(), timeout=ctx.stage_timeout)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - 段级超时/异常 → 该段 na（CancelledError 不在此列）
-            ctx.error(name, name, f"阶段超时或异常（{type(exc).__name__}）")
-            return {}, False
+            ctx.error(name, name, f"阶段超时或异常（{type(exc).__name__}）", source=KIND_PIPELINE)
+            return empty, False
 
     async def moneyflow_or_none() -> str | None:
         """moneyflow 快照：纳入段级超时（_call 本身无 wait_for——原先裸 await 不受 60s 保障，2026-09-07 审查）。"""
@@ -636,12 +641,12 @@ async def build_report(
     # 各函数自吞异常（仅 CancelledError 透传），gather 不会因某段失败中断其它段。
     (board_rows, board_ok), flow_map, (watch_raw, watch_ok), (ann_rows, ann_ok), (fc_rows, fc_ok), (news_rows, news_ok), moneyflow = (
         await asyncio.gather(
-            stage("board", lambda: _fetch_board(tools, ctx, cfg, day)),
-            stage("board_flow", lambda: _fetch_board_flow(tools, ctx, cfg, day)),
-            stage("watchlist", lambda: _fetch_watchlist(tools, ctx, cfg, day)),
-            stage("announce", lambda: _fetch_announce(tools, ctx, cfg, day)),
-            stage("forecast", lambda: _fetch_forecast(tools, ctx, cfg, day)),
-            stage("news", lambda: _fetch_news(tools, ctx, cfg, day)),
+            stage("board", lambda: _fetch_board(tools, ctx, cfg, day), empty=[]),
+            stage("board_flow", lambda: _fetch_board_flow(tools, ctx, cfg, day), empty={}),
+            stage("watchlist", lambda: _fetch_watchlist(tools, ctx, cfg, day), empty={}),
+            stage("announce", lambda: _fetch_announce(tools, ctx, cfg, day), empty=[]),
+            stage("forecast", lambda: _fetch_forecast(tools, ctx, cfg, day), empty=[]),
+            stage("news", lambda: _fetch_news(tools, ctx, cfg, day), empty=[]),
             moneyflow_or_none(),
         )
     )
@@ -653,17 +658,16 @@ async def build_report(
     board_rows = _merge_flow(board_rows, flow_map)
     board_proj = project_board(board_rows)
     # 标的池资金流 TOP5：moneyflow 全市场快照 → 池滤 → 降序前 5（best-effort，无数据不阻断）
-    top_inflow = _top_stock_inflow(moneyflow, cfg, names_by_code)
+    top_inflow = _top_stock_inflow(moneyflow, names_by_code)
     if top_inflow:
+        # 个股级 TOP5 会顶掉 project_board 算出的板块级列表——把后者保留下来而不是丢掉，
+        # 字段名各自诚实（`top_inflow` 现在装的是个股，`sector_inflow_top` 才是板块）。
+        board_proj["sector_inflow_top"] = board_proj.get("top_inflow", [])
         board_proj["top_inflow"] = [
-            {"rank": i + 1, "name": n, "inflow": v, "inflow_text": f"{v:.2f}"}
+            {"rank": i + 1, "name": n, "inflow": v, "inflow_text": _fmt_yi(v)}
             for i, (n, v) in enumerate(top_inflow)
         ]
-    pool_total = _pool_inflow_sum(moneyflow, cfg, names_by_code)
-    board_proj["pool_inflow"] = {
-        "value": pool_total,
-        "text": f"{pool_total:+.2f} 亿" if pool_total is not None else None,
-    }
+    board_proj["pool_inflow"] = _pool_inflow_sum(moneyflow, names_by_code)
 
     board_section = _section(
         board_proj, board_rows, board_ok,
@@ -691,7 +695,10 @@ async def build_report(
         board_proj.get("rows", []),
         board_proj.get("top_inflow", []),
         forecast_proj.get("items", []),
-        watch_rows=watch_raw.get("rows", []),
+        # **未截断**的全量行：`rows` 已按 display_limit 截断（211 只的池子只剩 100 只），
+        # 用它统计会让「标的池 N 涨 M 跌」「涨幅居前 TOP2」只覆盖池子的前 100 只
+        # （且是 watchlist.json 原始顺序、不是涨跌幅排序）。`_` 前缀键在 line 上方被剥掉、不进契约。
+        watch_rows=watch_raw.get("_all_rows") or watch_raw.get("rows", []),
         counts={
             "announce": len(announce_proj.get("items", [])),
             "news": len(news_proj.get("items", [])),
@@ -744,7 +751,16 @@ def _merge_flow(rows: list[dict[str, Any]], flow_map: dict[str, float | None]) -
     return rows
 
 
-def _top_stock_inflow(moneyflow_content: str | None, cfg: WatchlistConfig, names: dict[str, str]) -> list[tuple[str, float]]:
+def _fmt_yi(v: float) -> str:
+    """已换算为**亿元**的数值 → 展示串。两条 top_inflow 路径共用一份格式化。
+
+    刻意不用 tracker_render._to_yi：那个会先跑 `_yi_num` 的「>=1000 视为万元」启发式，
+    对已经是亿元的值构成**二次换算**（≥1000 亿时会被再除 1e4）。
+    """
+    return f"{v:.2f}"
+
+
+def _top_stock_inflow(moneyflow_content: str | None, names: dict[str, str]) -> list[tuple[str, float]]:
     """个股资金流（moneyflow 全市场快照）→ 池滤 → 净流入降序 TOP5：(name, 亿元)。"""
     if not moneyflow_content:
         return []
@@ -754,27 +770,53 @@ def _top_stock_inflow(moneyflow_content: str | None, cfg: WatchlistConfig, names
         code = str(_get(r, "ts_code") or "")
         if code not in names:
             continue
-        val = _to_yi_num(_get(r, "net_mf_amount"))
+        val = flow_to_yi(_get(r, "net_mf_amount"), max_yi=_MAX_STOCK_INFLOW_YI)
         if val is not None:
             candidates.append((names[code], val))
     candidates.sort(key=lambda x: x[1], reverse=True)
     return candidates[:5]
 
 
-def _pool_inflow_sum(moneyflow_content: str | None, cfg: WatchlistConfig, names: dict[str, str]) -> float | None:
-    """标的池整体资金流合计（亿元）：moneyflow 全市场快照池滤后求和，不截 top5。
+def _pool_inflow_sum(
+    moneyflow_content: str | None, names: dict[str, str]
+) -> dict[str, Any]:
+    """标的池整体资金流合计（亿元）→ {value, text, count, dropped, suspect}。
 
     板块段（指数来源）天然没有「主力资金净流入」概念（见 _fetch_board 环3），用这个池级
     汇总代替逐指数展示，复用与 _top_stock_inflow 相同的取值/换算口径，避免两处口径漂移。
+
+    **刻意不给合计封顶**：丢掉一个真实的 +328 亿净流入日，比把它显示出来更糟
+    （违背本模块「缺则标未接入、绝不编造」但也绝不隐瞒的原则）。合计改为**可审计**：
+    - `count` = 参与合计的行数、`dropped` = 被逐条守卫丢掉的行数；
+    - `incomplete = dropped > 0` —— 这是**事实**而非猜测：确实有行没被计入，合计因此偏低，
+      前端据此标注而不是默默呈现一个不完整的和。
+
+    这里刻意**没有**「合计超过某个亿元阈值就算可疑」的判定：一个 211 只标的的产业链池
+    在普涨日（实测 137 涨 / 均幅 +2.12%）合计 262 亿完全正常，任何这类阈值都会在正常日误报。
+    宁可不给信号，也不给假信号。
     """
     if not moneyflow_content:
-        return None
+        return {"value": None, "text": None, "count": 0, "dropped": 0, "incomplete": False}
     total: float | None = None
+    count = 0
+    dropped = 0
     for r in _extract_rows(moneyflow_content):
         code = str(_get(r, "ts_code") or "")
         if code not in names:
             continue
-        val = _to_yi_num(_get(r, "net_mf_amount"))
-        if val is not None:
-            total = (total or 0.0) + val
-    return round(total, 4) if total is not None else None
+        raw = _get(r, "net_mf_amount")
+        val = flow_to_yi(raw, max_yi=_MAX_STOCK_INFLOW_YI)
+        if val is None:
+            if raw is not None and raw != "":
+                dropped += 1
+            continue
+        total = (total or 0.0) + val
+        count += 1
+    value = round(total, 4) if total is not None else None
+    return {
+        "value": value,
+        "text": f"{value:+.2f} 亿" if value is not None else None,
+        "count": count,
+        "dropped": dropped,
+        "incomplete": dropped > 0,
+    }

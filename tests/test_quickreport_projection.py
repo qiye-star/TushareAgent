@@ -7,7 +7,9 @@ import pytest
 from demomcp.quickreport.projection import (
     _fmt_range,
     build_brief,
+    flow_to_yi,
     join_watchlist,
+    pool_stats,
     project_announce,
     project_board,
     project_forecast,
@@ -234,3 +236,93 @@ def test_build_brief_extended_material() -> None:
     # watch/counts 缺省 → 老素材行为不变
     old = build_brief(board, inflow, forecast)
     assert "标的池" not in old["text"] and "公告" not in old["text"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 回归：已实测确认的计算缺陷
+# ---------------------------------------------------------------------------
+
+
+def test_project_board_sorts_zero_inflow_above_negative() -> None:
+    """`inflow == 0.0` 不能被当成「无数据」排到负值之后。
+
+    原实现 `key=lambda x: (x["inflow"] or float("-inf"))` 里 0.0 是 falsy → 变 -inf，
+    于是「零净流入」排在「净流出 50 亿」后面。真实的排序错误。
+    """
+    rows = [
+        {"name": "净流出", "main_net_inflow": -500000},  # -50 亿
+        {"name": "零流入", "main_net_inflow": 0},
+        {"name": "净流入", "main_net_inflow": 100000},  # +10 亿
+    ]
+    out = project_board(rows)
+    assert [x["name"] for x in out["top_inflow"]] == ["净流入", "零流入", "净流出"]
+    assert out["top_inflow"][1]["inflow"] == 0.0
+
+
+def test_join_watchlist_indexed_lookup_large_pool() -> None:
+    """全市场快照 × 大池子：索引化后结果必须与逐行扫描完全一致。
+
+    原实现对每个池内代码在全市场快照里做两次 `next(...)` 线性扫
+    （实测 211 只 × ~5400 行 × 2 ≈ 230 万次比较）。这里只验正确性，不做计时断言（CI 会 flaky）。
+    """
+    market = [
+        {"ts_code": f"{600000 + i}.SH", "close": 10.0 + i, "pct_change": float(i % 5) - 2}
+        for i in range(3000)
+    ]
+    basic = [{"ts_code": f"{600000 + i}.SH", "turnover_rate": 1.5, "total_mv": 1000000} for i in range(3000)]
+    prev = [{"ts_code": f"{600000 + i}.SH", "close": 10.0} for i in range(3000)]
+    names = {f"{600000 + i}.SH": f"股票{i}" for i in range(0, 400, 2)}  # 200 只
+    out = join_watchlist(market, prev, basic, names, display_limit=100)
+    assert out["pool_count"] == 200
+    assert out["row_count"] == 200
+    assert len(out["rows"]) == 100  # 展示截断
+    assert len(out["_all_rows"]) == 200  # 统计用全量
+    assert out["missing_codes"] == 0
+    first = out["rows"][0]
+    assert first["ts_code"] == "600000.SH"
+    assert first["close"] == 10.0
+    assert first["market_cap"] == 100.0  # 1000000 万 / 1e4
+    assert first["week_pct"] == 0.0  # 10.0 → 10.0
+
+
+def test_join_watchlist_close_and_pct_come_from_same_row() -> None:
+    """close 与 pct 必须取自同一行（原实现 close 走 last-wins、pct 走 first-wins）。"""
+    market = [
+        {"ts_code": "000001.SZ", "close": 11.0, "pct_change": 5.0},
+        {"ts_code": "000001.SZ", "close": 99.0, "pct_change": -9.0},  # 重复行（快照不该有，但要有确定语义）
+    ]
+    out = join_watchlist(market, [], [], {"000001.SZ": "平安"}, display_limit=10)
+    row = out["rows"][0]
+    assert (row["close"], row["pct"]) == (11.0, 5.0)  # first-wins，两个字段同源
+
+
+def test_pool_stats_full_pool_semantics() -> None:
+    """池统计口径：只算有 pct 的行，并回传 computed_over 让前端能诚实标注。"""
+    rows = [
+        {"pct": 3.0}, {"pct": -1.0}, {"pct": 0.0}, {"pct": None}, {"pct": 5.0},
+    ]
+    st = pool_stats(rows)
+    assert (st["up"], st["down"], st["flat"]) == (2, 1, 1)
+    assert st["computed_over"] == 4  # None 不参与
+    assert st["avg_pct"] == round((3.0 - 1.0 + 0.0 + 5.0) / 4, 4)
+    assert st["median_pct"] == 1.5  # sorted=[-1,0,3,5] → (0+3)/2
+    assert pool_stats([])["computed_over"] == 0
+    assert pool_stats([{"pct": None}])["avg_pct"] is None
+
+
+def test_flow_to_yi_is_single_implementation() -> None:
+    """万元→亿元换算全仓只有一份（结构性防回归：曾经 pipeline 与 projection 各有一份）。"""
+    from demomcp.quickreport import pipeline as pl
+
+    assert pl.flow_to_yi is flow_to_yi
+
+
+def test_flow_to_yi_max_yi_guard_is_configurable() -> None:
+    assert flow_to_yi(120000) == 12.0  # 12 亿，默认 100 亿上界内
+    assert flow_to_yi(993.99) == 0.0994  # 小额不被启发式误当亿元
+    assert flow_to_yi(99999999) is None  # 超 100 亿 → 单位错乱，弃
+    assert flow_to_yi(600000, max_yi=50.0) is None  # 显式收紧上界时才拦
+    assert flow_to_yi(400000, max_yi=50.0) == 40.0
+    # 默认上界必须留到 100 亿：实测 65.48 亿（中际旭创 2026-09-07）是真实的单票净流入，
+    # 收到 50 亿会把它当脏数据丢掉。
+    assert flow_to_yi(654819) == 65.4819

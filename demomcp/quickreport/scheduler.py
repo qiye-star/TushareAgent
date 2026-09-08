@@ -27,7 +27,8 @@ from demomcp.quickreport.store import load_report, save_last_error
 
 log = logging.getLogger("quickreport")
 
-_WARMUP = 30.0  # 启动补跑前的宽限：给工具池热启动让路
+_WARMUP = 5.0  # 启动补跑前的宽限（秒）：给工具池热启动让路
+# 注意：原先写 30.0 却在调用处 `min(_WARMUP, 5.0)`——常量说 30、代码实际 5，取实际值。
 
 
 def _tz_of(sched: Schedule):
@@ -69,7 +70,7 @@ async def run_forever(
     # 启动补跑：latest 缺失或过期时立即生成一份（_run_once 自带去重守卫，安全幂等）；
     # 短宽限给工具池热启动让路；补跑失败不阻断调度循环
     try:
-        await asyncio.sleep(min(_WARMUP, 5.0))
+        await asyncio.sleep(_WARMUP)
         await _run_once(get_tools, generate_from, stage_timeout, concurrency, lock=lock, release_tools=release_tools)
     except asyncio.CancelledError:
         raise
