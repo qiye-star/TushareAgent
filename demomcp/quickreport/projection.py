@@ -388,3 +388,88 @@ def build_brief(
         if low_value:
             text = "；".join(p for p in parts if p not in low_value) + "。"
     return {"text": text[:150], "chars": min(len(text), 150)}
+
+
+# ---------------------------------------------------------------------------
+# 指数走势序列（给前端折线图）
+# ---------------------------------------------------------------------------
+
+# 序列列顺序刻意用 [date, open, close, low, high, volume]：
+# **中间四个正是 ECharts 蜡烛图的 value 顺序**，前端 `rows.map(r => r.slice(1, 5))`
+# 直接就能喂 candlestick，`r[0]` 作类目轴、`r[5]` 作成交量柱，不需要任何重映射。
+# 用 array-of-arrays 而不是 array-of-dicts：同样的数据体积约省 4 倍
+# （store 用 indent=2 落盘并按日归档，条数 × 天数直接决定存档大小）。
+SERIES_FIELDS: tuple[str, ...] = ("date", "open", "close", "low", "high", "volume")
+
+_SER_DATE = ("trade_date", "date", "日期")
+_SER_OPEN = ("open", "开盘")
+_SER_CLOSE = ("close", "收盘")
+_SER_LOW = ("low", "最低")
+_SER_HIGH = ("high", "最高")
+_SER_VOL = ("volume", "vol", "成交量")
+
+
+def _norm_date(v: Any) -> str:
+    """`20260907` / `2026-09-07` → `2026-09-07`；取不到 → ""。"""
+    s = str(v or "").strip()
+    if len(s) == 8 and s.isdigit():
+        return f"{s[:4]}-{s[4:6]}-{s[6:]}"
+    return s[:10]
+
+
+def build_index_series(
+    name: str, code: str, rows: list[dict[str, Any]], *, days: int = 120
+) -> dict[str, Any]:
+    """原始行（Tushare index_daily 或 AkShare get_index_data）→ 前端折线图用的序列结构。
+
+    - **升序**输出（Tushare 实测降序返回、AkShare 升序），并按 `days` 取**尾部**；
+    - 无日期或无收盘的行丢弃（x 轴对不齐比少一个点更糟）；
+    - `last.pct` 由最后两个收盘价推出——不额外调接口，顺手把「今日涨跌」给了 KPI 用。
+    """
+    parsed: list[tuple[str, list[Any]]] = []
+    for r in rows:
+        dt = _norm_date(_get(r, *_SER_DATE))
+        close = _num(_get(r, *_SER_CLOSE))
+        if not dt or close is None:
+            continue
+        parsed.append(
+            (
+                dt,
+                [
+                    dt,
+                    _num(_get(r, *_SER_OPEN)),
+                    close,
+                    _num(_get(r, *_SER_LOW)),
+                    _num(_get(r, *_SER_HIGH)),
+                    _num(_get(r, *_SER_VOL)),
+                ],
+            )
+        )
+    # 按日期升序 + 同日去重（保后者）——两个源的排序方向相反，不做假设、统一重排
+    dedup: dict[str, list[Any]] = {}
+    for dt, row in parsed:
+        dedup[dt] = row
+    ordered = [dedup[k] for k in sorted(dedup)]
+    ordered = ordered[-days:] if days > 0 else ordered
+
+    last: dict[str, Any] = {}
+    if ordered:
+        last_close = ordered[-1][2]
+        prev_close = ordered[-2][2] if len(ordered) >= 2 else None
+        pct = None
+        if last_close is not None and prev_close not in (None, 0):
+            pct = round((last_close - prev_close) / prev_close * 100, 4)
+        last = {
+            "date": ordered[-1][0],
+            "close": last_close,
+            "pct": pct,
+            "pct_text": _fmt_pct(pct) if pct is not None else None,
+        }
+    return {
+        "name": name,
+        "code": code,
+        "fields": list(SERIES_FIELDS),
+        "rows": ordered,
+        "count": len(ordered),
+        "last": last,
+    }

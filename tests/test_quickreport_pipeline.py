@@ -671,3 +671,138 @@ async def test_stage_timeout_returns_three_tuple_for_news(tmp_path) -> None:
     assert report["news"]["status"] == "na"
     assert isinstance(report["news"]["items"], list)
     assert any("超时" in e["reason"] for e in report["errors"])
+
+
+# ---------------------------------------------------------------------------
+# Phase 3：指数走势序列（board.series 子键，不是第七段）
+# ---------------------------------------------------------------------------
+
+
+async def test_board_series_absent_when_unconfigured(tmp_path) -> None:
+    """默认 board.series = () → **一次调用都不产生**，errors 保持干净。
+
+    这是「做成子键 + 默认空」而不是第七段的关键收益：现有 fixture 完全不受影响
+    （六段全通那个测试断言 errors == []，新段缺 handler 会立刻打破它）。
+    """
+    tools = FakeTools(_happy_handlers())
+    report = await build_report(tools, _cfg(tmp_path), report_date="20260904", stage_timeout=20.0)
+    assert report["board"]["series"] == []
+    assert report["board"]["series_status"] == "na"
+    assert report["errors"] == []
+    assert not [c for c in tools.calls if c[0] == "get_index_data"]
+    # 子键失败不进顶层 missing（missing 只看五段的 status）
+    assert report["missing"] == []
+
+
+async def test_board_series_shape_and_order(tmp_path) -> None:
+    """Tushare index_daily 实测是**裸数组且降序**——必须重排成升序并取尾部 days。"""
+    # 降序（最新在前），模拟真实返回；6 天数据配 series_days=5 → 应丢掉最早那天
+    rows = [
+        {"ts_code": "000001.SH", "trade_date": "20260904", "open": 10.0, "close": 12.0,
+         "low": 9.5, "high": 12.5, "vol": 300},
+        {"ts_code": "000001.SH", "trade_date": "20260903", "open": 9.0, "close": 10.0,
+         "low": 8.8, "high": 10.2, "vol": 200},
+        {"ts_code": "000001.SH", "trade_date": "20260902", "open": 8.0, "close": 9.0,
+         "low": 7.9, "high": 9.1, "vol": 100},
+        {"ts_code": "000001.SH", "trade_date": "20260901", "open": 7.0, "close": 8.0,
+         "low": 6.9, "high": 8.1, "vol": 90},
+        {"ts_code": "000001.SH", "trade_date": "20260831", "open": 6.0, "close": 7.0,
+         "low": 5.9, "high": 7.1, "vol": 80},
+        {"ts_code": "000001.SH", "trade_date": "20260828", "open": 5.0, "close": 6.0,
+         "low": 4.9, "high": 6.1, "vol": 70},
+    ]
+    handlers = _happy_handlers()
+    handlers["index_daily"] = lambda n, a: ToolResult(_bare(rows), is_error=False)
+    # series_days 下限被 config 夹到 5（2 个点画不出走势），这里直接用 5
+    cfg = _cfg(tmp_path, board={
+        "indexes": ["上证指数"], "dc_flow": False,
+        "series": [{"name": "上证指数", "code": "000001.SH"}], "series_days": 5,
+    })
+    report = await build_report(FakeTools(handlers), cfg, report_date="20260904", stage_timeout=20.0)
+
+    assert report["board"]["series_status"] == "ok"
+    s = report["board"]["series"][0]
+    assert s["name"] == "上证指数" and s["code"] == "000001.SH"
+    # ECharts 蜡烛图的 value 顺序：open, close, low, high
+    assert s["fields"] == ["date", "open", "close", "low", "high", "volume"]
+    assert s["count"] == 5  # series_days=5 → 取尾部 5 天，最早的 08-28 被丢
+    assert [r[0] for r in s["rows"]] == [
+        "2026-08-31", "2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04",
+    ]  # 升序（源是降序）
+    assert s["rows"][-1] == ["2026-09-04", 10.0, 12.0, 9.5, 12.5, 300.0]
+    # last.pct 由最后两个收盘推出（12.0 vs 10.0 → +20%），不额外调接口
+    assert s["last"]["date"] == "2026-09-04"
+    assert s["last"]["close"] == 12.0
+    assert s["last"]["pct"] == 20.0
+    assert s["last"]["pct_text"] == "+20.00%"
+
+
+async def test_board_series_falls_back_to_akshare(tmp_path) -> None:
+    """Tushare 失败 → AkShare get_index_data 兜底，且必须传 **6 位裸码**（不带 .SH/.SZ）。"""
+    ak_rows = [  # AkShare 是升序、列名 date/open/close/low/high/volume
+        {"date": "2026-09-03", "open": 9.0, "close": 10.0, "low": 8.8, "high": 10.2, "volume": 200},
+        {"date": "2026-09-04", "open": 10.0, "close": 11.0, "low": 9.9, "high": 11.2, "volume": 300},
+    ]
+    handlers = _happy_handlers()
+    handlers["index_daily"] = lambda n, a: ToolResult("ERR", is_error=True)
+    handlers["get_index_data"] = lambda n, a: ToolResult(_bare(ak_rows), is_error=False)
+    cfg = _cfg(tmp_path, board={
+        "indexes": [], "dc_flow": False,
+        "series": [{"name": "沪深300", "code": "000300.SH"}], "series_days": 120,
+    })
+    tools = FakeTools(handlers)
+    report = await build_report(tools, cfg, report_date="20260904", stage_timeout=20.0)
+
+    s = report["board"]["series"][0]
+    assert s["count"] == 2
+    assert s["last"]["close"] == 11.0
+    gi = next(c for c in tools.calls if c[0] == "get_index_data")[1]
+    assert gi["index_code"] == "000300"  # 裸码
+
+
+async def test_board_series_failure_does_not_change_board_status(tmp_path) -> None:
+    """序列全败时 board 段自身仍是 ok —— 两件事的严重性不同，不能互相污染。"""
+    handlers = _happy_handlers()
+    handlers["index_daily"] = lambda n, a: ToolResult(
+        _ok([{"ts_code": a.get("ts_code"), "trade_date": "20260904", "close": 4000.0, "pct_chg": 0.85}])
+        if a.get("trade_date") or a.get("start_date") == "20260904" else _free_err("index_daily"),
+        is_error=False,
+    )
+    handlers["get_index_data"] = lambda n, a: ToolResult(_free_err("get_index_data"), is_error=False)
+    cfg = _cfg(tmp_path, board={
+        "indexes": ["上证指数"], "dc_flow": False,
+        "series": [{"name": "上证指数", "code": "000001.SH"}], "series_days": 120,
+    })
+    report = await build_report(FakeTools(handlers), cfg, report_date="20260904", stage_timeout=20.0)
+    assert report["board"]["status"] == "ok"       # 板块段照常
+    assert report["board"]["series_status"] == "na"  # 只有子键 na
+    assert "board" not in report["missing"]
+
+
+def test_build_index_series_drops_bad_rows_and_dedups() -> None:
+    """无日期/无收盘的行丢弃（x 轴对不齐比少个点更糟）；同日重复保后者；空序列 last 为 {}。"""
+    from demomcp.quickreport.projection import build_index_series
+
+    rows = [
+        {"trade_date": "20260902", "close": 9.0},
+        {"trade_date": "", "close": 8.0},          # 无日期 → 丢
+        {"trade_date": "20260903", "close": None},  # 无收盘 → 丢
+        {"trade_date": "20260902", "close": 9.5},   # 同日重复 → 保后者
+        {"trade_date": "20260904", "close": 10.0},
+    ]
+    s = build_index_series("X", "000001.SH", rows, days=120)
+    assert [r[0] for r in s["rows"]] == ["2026-09-02", "2026-09-04"]
+    assert s["rows"][0][2] == 9.5  # 后者胜
+    assert s["count"] == 2
+
+    empty = build_index_series("X", "000001.SH", [], days=120)
+    assert empty["rows"] == [] and empty["count"] == 0 and empty["last"] == {}
+
+
+def test_build_index_series_normalizes_both_date_formats() -> None:
+    """Tushare 给 `20260907`、AkShare 给 `2026-09-07` —— 统一成 ISO。"""
+    from demomcp.quickreport.projection import build_index_series
+
+    a = build_index_series("A", "c", [{"trade_date": "20260907", "close": 1.0}])
+    b = build_index_series("B", "c", [{"date": "2026-09-07", "close": 1.0}])
+    assert a["rows"][0][0] == b["rows"][0][0] == "2026-09-07"

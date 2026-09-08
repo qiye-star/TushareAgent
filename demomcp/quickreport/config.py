@@ -12,6 +12,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import timedelta, timezone
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from demomcp.config.env import PROJECT_ROOT
@@ -68,11 +69,27 @@ class StockCfg:
 
 
 @dataclass(frozen=True)
+class IndexSeriesCfg:
+    """一条指数走势序列：展示名 + **显式** ts_code。
+
+    刻意不从 index_basic 派生 code：走势段与板块段在同一个 asyncio.gather 里并行，
+    派生就得先等板块段拿到分类表、把并行变成串行。
+    """
+
+    name: str
+    code: str
+
+
+@dataclass(frozen=True)
 class BoardCfg:
     th_concepts: tuple[str, ...] = ()  # 环1：同花顺概念名（ths_index/ths_daily）
     sw_indexes: tuple[str, ...] = ()   # 环2：申万指数名（index_classify/sw_daily）
     indexes: tuple[str, ...] = ()      # 环3：通用指数名（index_basic/index_daily）
     dc_flow: bool = True               # 是否 best-effort 尝试东财板块资金流（moneyflow_ind_dc 等）
+    # 指数走势序列（给前端折线图）。**默认空 = 不取**：一条也不配就不会产生任何额外调用，
+    # 现有测试 fixture 因此完全不受影响（六段全通那个测试断言 errors == []）。
+    series: tuple[IndexSeriesCfg, ...] = ()
+    series_days: int = 120             # 每条序列保留的交易日数（尾部）
 
 
 @dataclass(frozen=True)
@@ -157,6 +174,10 @@ class WatchlistConfig:
                     sw_indexes=tuple(str(x) for x in board_raw.get("sw_indexes", []) if x),
                     indexes=tuple(str(x) for x in board_raw.get("indexes", []) if x),
                     dc_flow=bool(board_raw.get("dc_flow", True)),
+                    series=_parse_series(board_raw.get("series")),
+                    # 上限 500：index_daily 一次最多给这么多，再大也拿不到；
+                    # 下限 5：少于这个数画不出走势
+                    series_days=max(5, min(500, int(board_raw.get("series_days", 120)))),
                 ),
                 thresholds=Thresholds(
                     up=float(thr_raw.get("up", 50.0)),
@@ -176,6 +197,25 @@ class WatchlistConfig:
         except (TypeError, ValueError) as exc:  # 字段类型不对（如 thresholds.up 是字符串）
             print(f"[quickreport] watchlist 配置解析失败：{exc}")
             return None
+
+
+def _parse_series(raw: Any) -> tuple[IndexSeriesCfg, ...]:
+    """board.series 配置 → IndexSeriesCfg 元组；name/code 缺一即跳过该条（不猜）。
+
+    硬上限 6 条：每条一次远端调用且要落进按日归档的 JSON
+    （store 用 indent=2 落盘，条数 × 天数直接决定存档体积）。
+    """
+    if not isinstance(raw, list):
+        return ()
+    out: list[IndexSeriesCfg] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        code = str(item.get("code") or "").strip()
+        if name and code:
+            out.append(IndexSeriesCfg(name=name, code=code))
+    return tuple(out[:6])
 
 
 class ConfigError(Exception):

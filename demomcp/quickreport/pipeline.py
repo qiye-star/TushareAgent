@@ -26,10 +26,16 @@ from typing import Any
 
 from demomcp.graph.tracker_render import _extract_rows, _get
 from demomcp.interfaces.tool_provider import ToolProvider
-from demomcp.quickreport.config import ConfigError, WatchlistConfig, cn_tz
+from demomcp.quickreport.config import (
+    ConfigError,
+    IndexSeriesCfg,
+    WatchlistConfig,
+    cn_tz,
+)
 from demomcp.quickreport.predicate import news_meta_of, news_title_of, news_url_of
 from demomcp.quickreport.projection import (
     build_brief,
+    build_index_series,
     flow_to_yi,
     join_watchlist,
     project_announce,
@@ -348,6 +354,63 @@ async def _fetch_board_flow(tools: ToolProvider, ctx: _Ctx, cfg: WatchlistConfig
                 merged[name] = flow_to_yi(_get(r, "net_amount"))
         return merged
     return merged
+
+
+async def _fetch_board_series(
+    tools: ToolProvider, ctx: _Ctx, cfg: WatchlistConfig, day: str
+) -> tuple[list[dict[str, Any]], bool]:
+    """指数走势序列（给前端折线图）：每条配置一次取数，降级链 Tushare -> AkShare。
+
+    主源 Tushare `index_daily(ts_code, start_date, end_date)`：与板块段**同源同口径**
+    （board 行的 pct 就来自它）、列里自带 pct_chg、已有权限、不依赖免费源进程存活。
+    实测返回**裸数组**（不是 {code,msg,data} 信封）且**降序**（最新在前）。
+
+    兜底 AkShare `get_index_data(index_code=6 位裸码)`（新浪源，不受东财行情 CDN 的 IP 封锁）：
+    实测 500 行 OHLCV，收盘价与 Tushare 逐位吻合（4575.0245 vs 4575.025），可互为交叉验证。
+
+    `board.series` 默认为空 -> 一条都不配就不会产生任何调用（现有测试 fixture 零影响）。
+    """
+    if not cfg.board.series:
+        return [], False
+    d = _parse_ymd(day)
+    # 多取一些自然日：120 个交易日约 170 个自然日，再放宽到 1.9 倍防长假
+    start = (d - timedelta(days=int(cfg.board.series_days * 1.9) + 10)).strftime("%Y%m%d")
+    out: list[dict[str, Any]] = []
+    chain_ok = False
+    for item in cfg.board.series:
+        rows = await _series_rows_tushare(tools, ctx, item, start, day)
+        if rows:
+            chain_ok = True
+        else:
+            rows = await _series_rows_akshare(tools, ctx, item)
+            if rows:
+                chain_ok = True
+        if not rows:
+            continue
+        out.append(build_index_series(item.name, item.code, rows, days=cfg.board.series_days))
+    return out, chain_ok
+
+
+async def _series_rows_tushare(
+    tools: ToolProvider, ctx: _Ctx, item: IndexSeriesCfg, start: str, end: str
+) -> list[dict[str, Any]]:
+    content = await _call(
+        tools, ctx, "index_daily",
+        {"ts_code": item.code, "start_date": start, "end_date": end},
+        stage="board_series",
+    )
+    return _extract_rows(content) if content is not None else []
+
+
+async def _series_rows_akshare(
+    tools: ToolProvider, ctx: _Ctx, item: IndexSeriesCfg
+) -> list[dict[str, Any]]:
+    """免费兜底：AkShare 要 6 位裸码（`000300.SH` -> `000300`），且总是给 tail(500)。"""
+    bare = item.code.split(".")[0]
+    content = await _call(
+        tools, ctx, "get_index_data", {"index_code": bare}, stage="board_series"
+    )
+    return _extract_rows(content) if content is not None else []
 
 
 async def _fetch_watchlist(
@@ -852,7 +915,16 @@ async def build_report(
 
     # 六段 + moneyflow 并行取数（模块 docstring 承诺的 asyncio.gather 语义；Semaphore(concurrency) 在此限流）。
     # 各函数自吞异常（仅 CancelledError 透传），gather 不会因某段失败中断其它段。
-    (board_rows, board_ok), flow_map, (watch_raw, watch_ok), (ann_rows, ann_ok), (fc_rows, fc_ok), (news_rows, news_ok, news_prov), moneyflow = (
+    (
+        (board_rows, board_ok),
+        flow_map,
+        (watch_raw, watch_ok),
+        (ann_rows, ann_ok),
+        (fc_rows, fc_ok),
+        (news_rows, news_ok, news_prov),
+        (series_rows, series_ok),
+        moneyflow,
+    ) = (
         await asyncio.gather(
             stage("board", lambda: _fetch_board(tools, ctx, cfg, day), fallback=([], False)),
             stage("board_flow", lambda: _fetch_board_flow(tools, ctx, cfg, day), fallback=({}, False)),
@@ -860,6 +932,8 @@ async def build_report(
             stage("announce", lambda: _fetch_announce(tools, ctx, cfg, day), fallback=([], False)),
             stage("forecast", lambda: _fetch_forecast(tools, ctx, cfg, day), fallback=([], False)),
             stage("news", lambda: _fetch_news(tools, ctx, cfg, day), fallback=([], False, {})),
+            # 独立成段级预算：新浪/Tushare 的走势取数慢不能拖垮板块环
+            stage("board_series", lambda: _fetch_board_series(tools, ctx, cfg, day), fallback=([], False)),
             moneyflow_or_none(),
         )
     )
@@ -881,6 +955,10 @@ async def build_report(
             for i, (n, v) in enumerate(top_inflow)
         ]
     board_proj["pool_inflow"] = _pool_inflow_sum(moneyflow, names_by_code)
+    # 指数走势序列：**board 的子键而不是第七段**。第七段会自动进顶层 missing（见下方 missing 推导），
+    # 且序列取数失败不该把整个板块段翻成「未接入」——两件事的严重性不同。
+    board_proj["series"] = series_rows
+    board_proj["series_status"] = "ok" if series_rows else ("empty" if series_ok else "na")
 
     board_section = _section(
         board_proj, board_rows, board_ok,
