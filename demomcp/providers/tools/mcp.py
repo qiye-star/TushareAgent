@@ -342,6 +342,35 @@ def _is_business_error(text: str) -> bool:
     return isinstance(code, (int, float)) and code != 0
 
 
+def gateway_business_error(text: str) -> bool:
+    """网关聚合连接专用的业务失败判据：JSON dict 且 `code` **不属于** {0, 1}。
+
+    为什么默认判据（`_is_business_error`，`code != 0`）在这条连接上是错的：
+    网关把五个源聚合到**一条** MCP 连接上，而各源的「成功」约定互相矛盾——
+    Tushare `code:0` 成功，而 **iFind `code:1` 成功**（`mcp_gateway/providers/ifind.py`）。
+    默认判据会把每一次成功的 iFind 调用判成业务失败并重试一遍：
+    实测同一次调用（输出逐字节相同）retries=2 用 6.20s、retries=0 用 0.65s，
+    **9.5× 放大**，还把 iFind「套餐硬限并发 2」的配额双倍烧掉。
+
+    网关侧虽然已给 iFind 源传了 `business_error`，但那只管网关自己到 iFind 的那一跳；
+    demomcp → 网关这一跳是另一条连接、另一个 `MCPToolProvider`，必须单独给判据。
+
+    刻意**不改** `_is_business_error`：它被 `tests/test_mcp_retry.py` 用
+    `{"code":1,"msg":"参数缺失"}` 当作业务失败的标准样例锁定，而在 Tushare 语义下那是对的。
+    同一段文本的含义取决于它来自哪个源，所以这里是「多一个判据」而不是「改判据」。
+
+    接新数据源时若它的成功码不是 0/1，记得把它加进这里的白名单
+    （否则它的每次成功都会被静默重试一遍——不报错、只是慢一倍且烧配额，很难发现）。
+    """
+    body = _parse_result(text)
+    if body is None:
+        return False
+    code = body.get("code", 0)
+    if not isinstance(code, (int, float)) or isinstance(code, bool):
+        return False
+    return code not in (0, 1)
+
+
 def _permission_signal(text: str) -> tuple[bool, str]:
     """探测内容是否指向积分/权限不足；返回 (是否权限类, 归一化 msg)。"""
     body = _parse_result(text)

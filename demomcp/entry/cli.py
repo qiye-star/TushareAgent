@@ -15,7 +15,7 @@ from demomcp.config.logging import configure_logging, get_logger, log_chat_turn
 from demomcp.config.settings import Settings
 from demomcp.db.store import build_store
 from demomcp.providers.llm.deepseek import DeepSeekLLMClient
-from demomcp.providers.tools.mcp import mcp_tool_provider
+from demomcp.providers.tools.mcp import gateway_business_error, mcp_tool_provider
 
 logger = get_logger("entry.cli")
 
@@ -48,6 +48,7 @@ async def main() -> int:
             timeout=settings.mcp_timeout,
             retries=settings.mcp_retries,
             keepalive_interval=settings.mcp_keepalive_interval or None,
+            business_error=gateway_business_error,  # 见 web.py 同处注释：混合信封需聚合判据
         ) as tools:
             agent = Agent(llm=llm, tools=tools, config=settings)
             session_id = uuid.uuid4().hex

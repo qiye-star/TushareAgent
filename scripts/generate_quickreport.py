@@ -38,7 +38,7 @@ import json
 import sys
 
 from demomcp.config.settings import Settings
-from demomcp.providers.tools.mcp import mcp_tool_provider
+from demomcp.providers.tools.mcp import gateway_business_error, mcp_tool_provider
 from demomcp.quickreport.config import WatchlistConfig
 from demomcp.quickreport.server import generate_from
 
@@ -64,7 +64,10 @@ async def main() -> int:
 
     try:
         async with mcp_tool_provider(
-            settings.mcp_gateway_url, timeout=settings.mcp_timeout, retries=settings.mcp_retries
+            settings.mcp_gateway_url,
+            timeout=settings.mcp_timeout,
+            retries=settings.mcp_retries,
+            business_error=gateway_business_error,  # 见 web.py 同处注释：混合信封需聚合判据
         ) as tools:
             if args.if_stale:
                 # 与调度器共用同一个守卫，语义完全一致（避免两套「算不算最新」的判断漂移）

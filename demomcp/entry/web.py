@@ -42,7 +42,7 @@ from demomcp.graph.skill_loader import CAPABILITY_NOTE
 from demomcp.graph.skills import LIBRARY, get_skill
 from demomcp.interfaces.tool_provider import ToolProvider
 from demomcp.providers.llm.deepseek import DeepSeekLLMClient
-from demomcp.providers.tools.mcp import mcp_tool_provider
+from demomcp.providers.tools.mcp import gateway_business_error, mcp_tool_provider
 from demomcp.providers.tools.null import NullToolProvider
 from demomcp.rag.schemas import RetrievalPlan
 
@@ -89,6 +89,10 @@ def _tools_context(settings: Settings):
         timeout=settings.mcp_timeout,
         retries=settings.mcp_retries,
         keepalive_interval=settings.mcp_keepalive_interval or None,
+        # 网关一条连接上流着五个源的混合信封，各源「成功码」互相矛盾
+        # （Tushare code:0 成功 / iFind code:1 成功）→ 必须用聚合判据，
+        # 否则每次 iFind 成功都被判失败并重试（实测 0.65s → 6.20s，并双倍烧 iFind 并发配额）
+        business_error=gateway_business_error,
     )
 
 
