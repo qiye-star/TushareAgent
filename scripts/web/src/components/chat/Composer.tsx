@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { Paperclip, PaperPlaneRight, StopCircle } from '@phosphor-icons/react'
+import { Paperclip, PaperPlaneRight, Sparkle, StopCircle, X } from '@phosphor-icons/react'
 import { useChatStore } from '@/state/useChatStore'
 import { cn } from '@/lib/cn'
 import { Button } from '@/components/ui/Button'
@@ -13,6 +13,8 @@ export function Composer({ onSubmit }: { onSubmit: (query: string) => void }) {
   const stop = useChatStore((s) => s.stop)
   const chatMode = useChatStore((s) => s.chatMode)
   const setChatMode = useChatStore((s) => s.setChatMode)
+  const pendingSkill = useChatStore((s) => s.pendingSkill)
+  const setPendingSkill = useChatStore((s) => s.setPendingSkill)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
@@ -36,6 +38,24 @@ export function Composer({ onSubmit }: { onSubmit: (query: string) => void }) {
     <div className="border-t border-zinc-200 bg-white px-4 py-3 dark:border-zinc-800 dark:bg-zinc-950">
       <div className="mx-auto max-w-3xl">
         <div className="rounded-2xl border border-zinc-300 bg-white p-2 shadow-card transition-colors focus-within:border-primary-400 dark:border-zinc-700 dark:bg-zinc-900">
+          {pendingSkill && (
+            <div className="mx-1 mb-1 flex items-center gap-1.5 rounded-lg bg-primary-50 px-2.5 py-1.5 text-[12.5px] text-primary-700 dark:bg-primary-500/10 dark:text-primary-300">
+              <Sparkle size={13} weight="fill" className="shrink-0" />
+              <span className="min-w-0 truncate font-medium">{pendingSkill.name}</span>
+              <span className="shrink-0 text-[11px] text-primary-600/70 dark:text-primary-300/60">
+                本轮使用该技能
+              </span>
+              <button
+                type="button"
+                onClick={() => setPendingSkill(null)}
+                title="取消使用该技能"
+                className="ml-auto flex h-5 w-5 shrink-0 items-center justify-center rounded text-primary-500 hover:bg-primary-100 dark:hover:bg-primary-500/20"
+              >
+                <X size={12} weight="bold" />
+              </button>
+            </div>
+          )}
+
           <textarea
             ref={taRef}
             value={text}
@@ -49,7 +69,11 @@ export function Composer({ onSubmit }: { onSubmit: (query: string) => void }) {
                 submit()
               }
             }}
-            placeholder="向智能体提问…（Enter 发送，Shift+Enter 换行）"
+            placeholder={
+              pendingSkill
+                ? `告诉我标的/行业，用「${pendingSkill.name}」生成报告…`
+                : '向智能体提问…（Enter 发送，Shift+Enter 换行）'
+            }
             rows={1}
             className="max-h-[180px] min-h-[44px] w-full resize-none bg-transparent px-2.5 py-2 text-[14.5px] leading-relaxed text-zinc-800 outline-none placeholder:text-zinc-400 dark:text-zinc-100 dark:placeholder:text-zinc-500"
           />
@@ -86,6 +110,8 @@ export function Composer({ onSubmit }: { onSubmit: (query: string) => void }) {
                 size="sm"
                 variant={chatMode === 'quick' ? 'soft' : 'ghost'}
                 onClick={() => setChatMode('quick')}
+                disabled={!!pendingSkill}
+                title={pendingSkill ? '使用报告技能时需智能体模式' : undefined}
               >
                 快速问答
               </Button>

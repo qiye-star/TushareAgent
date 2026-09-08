@@ -8,6 +8,7 @@ import { useMcpStatus } from '@/hooks/useMcpStatus'
 import { useMcpSources } from '@/hooks/useMcpSources'
 import { useChatStore } from '@/state/useChatStore'
 import { getSession, getSessionTurns } from '@/lib/api'
+import type { SkillRow } from '@/lib/skills'
 import { AppShell } from '@/components/layout/AppShell'
 import { Sidebar } from '@/components/layout/Sidebar'
 import { TopBar } from '@/components/layout/TopBar'
@@ -16,10 +17,11 @@ import { MessageList } from '@/components/chat/MessageList'
 import { Composer } from '@/components/chat/Composer'
 import { QuickReportView } from '@/components/report/QuickReportView'
 import { SettingsView } from '@/components/settings/SettingsView'
+import { SkillsView } from '@/components/skills/SkillsView'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { GearSix } from '@phosphor-icons/react'
 
-export type MainView = 'chat' | 'report' | 'settings'
+export type MainView = 'chat' | 'report' | 'skills' | 'settings'
 
 export default function App() {
   const { theme, toggle: toggleTheme } = useTheme()
@@ -36,6 +38,7 @@ export default function App() {
   const resetLocal = useChatStore((s) => s.resetLocal)
   const loadHistory = useChatStore((s) => s.loadHistory)
   const loadTurns = useChatStore((s) => s.loadTurns)
+  const setPendingSkill = useChatStore((s) => s.setPendingSkill)
 
   const [activeId, setActiveId] = useState<string | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
@@ -52,6 +55,15 @@ export default function App() {
       await sessions.refresh()
     },
     [send, sessions],
+  )
+
+  // 技能页「快速使用」：把技能挂到输入框（强制本轮使用），并切回对话页
+  const handleQuickUseSkill = useCallback(
+    (skill: SkillRow) => {
+      setPendingSkill({ id: skill.id, name: skill.name })
+      setView('chat')
+    },
+    [setPendingSkill],
   )
 
   const handleNew = useCallback(() => {
@@ -182,6 +194,19 @@ export default function App() {
                 onRegenerate={() => void quickReport.regenerate()}
                 onBackToLatest={() => void quickReport.refresh()}
               />
+            </>
+          ) : view === 'skills' ? (
+            <>
+              <TopBar
+                title="投研技能库"
+                status="idle"
+                theme={theme}
+                onToggleTheme={toggleTheme}
+                onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
+                onReset={() => {}}
+                onClearContext={() => {}}
+              />
+              <SkillsView onQuickUse={handleQuickUseSkill} />
             </>
           ) : view === 'settings' ? (
             <>

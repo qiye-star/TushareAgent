@@ -38,7 +38,7 @@ function MetaRow({ step, streaming }: { step: Step; streaming?: boolean }) {
   if (kind === 'funnel') return <RetrievalFunnel data={data} />
 
   let summary = ''
-  if (kind === 'intent') summary = `意图：${data.intent ?? '未知'} · 策略：${data.strategy ?? 'auto'}`
+  if (kind === 'intent') summary = intentSummary(data)
   else if (kind === 'plan') summary = `拟用工具：${(data.tools ?? []).join('、') || '无'}`
   else if (kind === 'retrieval') summary = streaming ? '' : `策略 ${data.strategy ?? ''} · ${data.chunks ?? 0} 块 · ${(data.sources ?? []).length} 来源`
   else if (kind === 'validation') summary = (data.errors ?? []).length ? `${data.errors.length} 项校验提示` : '参数校验通过'
@@ -121,11 +121,18 @@ function paramsPreview(input: unknown): string {
   return s.length > 60 ? `${s.slice(0, 60)}…` : s
 }
 
+/** 意图行文案；命中报告技能时把技能名放最前（router 的 process 事件带 skill_name）。 */
+function intentSummary(d: Record<string, any>): string {
+  const base = `意图：${d.intent ?? '未知'} · 策略：${d.strategy ?? 'auto'}`
+  const skill = d.skill_name || d.skill
+  return skill ? `命中技能：${skill} · ${base}` : base
+}
+
 function stepDetail(step: Step): string {
   const d = step.data ?? {}
   switch (step.kind) {
     case 'intent':
-      return `意图：${d.intent ?? '未知'} · 策略：${d.strategy ?? 'auto'}`
+      return intentSummary(d)
     case 'plan':
       return `拟用工具：${(d.tools ?? []).join('、') || '无'}`
     case 'rewrite':

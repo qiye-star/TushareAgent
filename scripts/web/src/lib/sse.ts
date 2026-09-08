@@ -7,7 +7,14 @@ import type { RawSse } from './types'
  */
 export async function streamChat(
   url: string,
-  body: { message: string; session_id?: string | null; model?: string | null; mode?: 'quick' | 'agent' | null },
+  body: {
+    message: string
+    session_id?: string | null
+    model?: string | null
+    mode?: 'quick' | 'agent' | null
+    /** 技能页「快速使用」指定的报告技能 id；后端对未知/停用 id 只忽略、不报错。 */
+    skill?: string | null
+  },
   onEvent: (evt: RawSse) => void,
   signal: AbortSignal,
 ): Promise<void> {

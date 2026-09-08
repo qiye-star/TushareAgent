@@ -1,6 +1,13 @@
 import type { SessionMessage, SessionMeta, TurnBlob } from './types'
 import { parseQuickReport, type QuickReport } from './quickReport'
 import type { McpSource, McpSourcesResponse, McpStatus } from './mcp'
+import {
+  parseSkillDetail,
+  parseSkillList,
+  type SkillDetail,
+  type SkillDomain,
+  type SkillRow,
+} from './skills'
 
 const jsonHeaders = { 'Content-Type': 'application/json' }
 
@@ -134,3 +141,30 @@ export async function setMcpSourceEnabled(id: string, enabled: boolean): Promise
 }
 
 export { jsonHeaders }
+
+/** 报告技能库清单（技能页）。技能库被 SKILL_LIBRARY_ENABLED=false 关掉时返回空列表，不是错误。 */
+export async function listSkills(): Promise<{ skills: SkillRow[]; domains: SkillDomain[] }> {
+  const res = await fetch('/api/skills')
+  if (!res.ok) throw new Error(`无法获取技能列表 (${res.status})`)
+  return parseSkillList(await res.json())
+}
+
+/** 技能详情（正文 Markdown + 工具名对照 + 能力限制）；未知 id（404）→ null。 */
+export async function getSkillDetail(id: string): Promise<SkillDetail | null> {
+  const res = await fetch(`/api/skills/${encodeURIComponent(id)}`)
+  if (res.status === 404) return null
+  if (!res.ok) throw new Error(`无法获取技能详情 (${res.status})`)
+  return parseSkillDetail(await res.json())
+}
+
+/** 启用/停用单个技能：停用后不再参与自动路由，也不能被「快速使用」强制指定。 */
+export async function setSkillEnabled(id: string, enabled: boolean): Promise<boolean> {
+  const res = await fetch(`/api/skills/${encodeURIComponent(id)}/toggle`, {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({ enabled }),
+  })
+  if (!res.ok) throw new Error(`切换技能开关失败 (${res.status})`)
+  const body = (await res.json()) as { enabled?: unknown }
+  return body.enabled !== false
+}

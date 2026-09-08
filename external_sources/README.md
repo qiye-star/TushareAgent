@@ -60,5 +60,23 @@ CHINA_NEWS_MCP_URL=http://127.0.0.1:8001/mcp
   `async def`——FastMCP 会把同步函数丢线程池；写成 `async def` 反而会把阻塞调用搬到事件循环上堵死整个 server。
 - **数据来自网页抓取**，东方财富改版会让某个接口突然失效，属于免费源的固有代价。它的定位是
   兜底与交叉验证，不是主源。
-- `get_financials` 走同花顺网页接口（`stock_financial_abstract_ths`），字段口径与 Tushare 的
+- **东财行情 CDN 的反爬有层层墙（2026-09-08 实测）**，`akshare_server.py` 已按此打了两个补丁，
+  但有一层是环境性的、补不了：
+  1. **UA 墙**：`82.push2` / `push2his` / `datacenter-web` 等行情域拒绝非浏览器 UA——
+     akshare 1.18.x 的行情接口是裸 `requests.get`（默认 `python-requests/x.y` UA），整片
+     `RemoteDisconnected`。→ 补丁：全局给 requests 会话注入浏览器 UA（`Session.__init__` patch）。
+  2. **TLS 指纹墙**：UA 修好后部分环境仍拒 python requests/httpx/curl_cffi（OpenSSL 系指纹），
+     而系统 `curl.exe`（Windows Schannel 栈）放行。→ 补丁：对 `eastmoney.com` 域名的请求透明改道
+     `curl.exe` 子进程（`requests.get/post/Session.request` 的域名分流，其它域名走原库；
+     响应按 `requests.Response` 复刻，akshare 内部无感知）。
+  3. **IP 级封锁**（**补不了，属环境**）：东财对高频/云服务器出口 IP 间歇性封禁行情 CDN——
+     封禁窗口内即便 `curl.exe` 也 `Connection closed`；窗口外偶发 200。新闻/搜索域
+     （`search-api-web` / `finance.eastmoney.com`）不做此检测，始终可用。同花顺（`ths`）与
+     新浪（`stock_zh_index_daily`）也不受影响，所以 9 个工具里 `search_stock` / `get_financials` /
+     `get_index_data` 稳定可用。封禁时接口返回 `{"error": ...}`，属业务结果（`is_error=False`），
+     LLM 会如实转述并可改用 Tushare/万得的等价接口——**不要把这个当 bug 反复排查**。
+- **`get_financials` 的「报告期」列随 akshare 版本漂移**：年值可能是纯年份（`"1998"`）也可能是
+  `"1998-12-31"`，`str.contains("12-31")` 只在后一种形态下匹配，前一种会整表过滤成空。
+  `akshare_server.py` 已兼容两种（`12-31|^\d{4}$`）；升级 akshare 后再看到 annual 输出为空，先查这列。
+- **`get_financials` 走同花顺网页接口**（`stock_financial_abstract_ths`），字段口径与 Tushare 的
   `income`/`balancesheet` 不同，**不要**直接拿两边的数做同一张表。

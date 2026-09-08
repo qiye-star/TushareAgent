@@ -180,6 +180,10 @@ class Settings(BaseSettings):
     quickreport_stage_timeout: float = Field(default=60.0, alias="QUICKREPORT_STAGE_TIMEOUT")  # 单段取数上限（秒）
     quickreport_concurrency: int = Field(default=4, alias="QUICKREPORT_CONCURRENCY")  # MCP 并行调用上限
 
+    # 报告 skill 技能库（claude-for vendored 语料 → graph/skills.py 的注册表）
+    skill_library_enabled: bool = Field(default=True, alias="SKILL_LIBRARY_ENABLED")   # 逃生开关：false 只剩内置 skill
+    skill_library_dir: str = Field(default="", alias="SKILL_LIBRARY_DIR")              # 空 = 包内 demomcp/skill_library/claude-for
+
     @property
     def is_configured(self) -> bool:
         return bool(self.ds_api_key)

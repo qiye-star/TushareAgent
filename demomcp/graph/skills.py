@@ -5,19 +5,25 @@
   system_prompt（(base)->合成器系统提示词，LLM 路径用；render 非空时优先用 render）、
   render（(evidence, ctx)->str 确定性渲染器，非空则 synthesizer 不走 LLM）、
   tool_hint（取数引导，追加进 select_system）、should_rag / strategy（覆盖该 skill 用例下的 RAG 取舍）。
-- SKILLS 是可扩展清单：新报告类型（个股深度分析 / 行业对比等）只需加一条 entry；router 依 description 匹配，命中 → synthesizer 用该 skill 提示词。
+- SKILLS = BUILTIN_SKILLS（内置，如快报）+ claude-for 技能库（63 条 vendored SKILL.md，由 skill_loader 装配）；
+  新内置报告类型只需往 BUILTIN_SKILLS 加一条 entry；router 依 catalog_line/description 匹配，命中 → synthesizer 用该 skill 提示词。
 - 快报 skill（ai_supply_chain_tracker）为首个成员：六段式高频跟踪快报，只复述「可用数据」、缺失标『数据未接入』、绝不编造。
-- 本模块只依赖 typing（不 import prompts 之外的 graph 内核，避免循环）；通用 router 基础文案由 prompts.py 的 ROUTER_BASE 提供。
+- 本模块只依赖 prompts.ROUTER_BASE + tracker_render + skill_loader + config（不 import graph 内核，避免循环）。
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from demomcp.config.skill_toggle import is_skill_enabled
 from demomcp.graph.prompts import ROUTER_BASE
+from demomcp.graph.skill_loader import LoadedSkill, load_library
 from demomcp.graph.tracker_render import render_tracker
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -34,17 +40,23 @@ class Skill:
     should_rag: bool = False                      # 是否走年报 RAG（快报=行情/资金流/公告/新闻，默认跳过）
     strategy: str = "auto"                        # RAG 检索策略：factual/structural/auto
     report_type: str = ""                         # 输出类型标签（可选，供前端/归档）
+    catalog_line: str | None = None               # router 清单用的短描述（None → 用 description；见决策 D6）
 
 
 def build_router_system(skills: list[Skill] | None = None) -> str:
     """Router 系统提示词：基础意图分类 + （有 skill 时）可调用的报告 skill 清单。
 
     skills 为空/None → 纯基础提示词（向后兼容，已有测试不放 skills 也跑）。
+    清单行优先用 `catalog_line`（导入技能的中文短描述，整张清单 ~3.5KB；用原始 description 会到 20.7KB），
+    并**现读按技能开关**过滤（停用的技能不参与自然语言路由 → 改开关无需重启）。
     """
     base = ROUTER_BASE
     if not skills:
         return base
-    catalog = "\n".join(f"- {s.id}：{s.name} —— {s.description}" for s in skills)
+    enabled = [s for s in skills if is_skill_enabled(s.id)]
+    if not enabled:
+        return base
+    catalog = "\n".join(f"- {s.id}：{s.name} —— {s.catalog_line or s.description}" for s in enabled)
     return (
         f"{base}\n\n"
         "【可调用的投研报告 skill】当用户要「生成某类结构化报告」而非单点查询/对比时，在上方 JSON 的 "
@@ -122,5 +134,54 @@ tracker_skill = Skill(
 )
 
 
-# 可扩展注册表：新报告技能在此追加一条 entry 即可被 router 命中。
-SKILLS: list[Skill] = [tracker_skill]
+BUILTIN_SKILLS: list[Skill] = [tracker_skill]
+
+
+def _library_config() -> tuple[bool, str]:
+    """读技能库开关与目录（走 Settings 以便 .env 生效）；读不到就按「开、包内默认目录」。"""
+    try:
+        from demomcp.config.settings import Settings
+
+        cfg = Settings()
+        return bool(cfg.skill_library_enabled), str(cfg.skill_library_dir or "")
+    except Exception as exc:  # noqa: BLE001 - 配置读取失败不该让 import 崩
+        _log.warning("skill_library 配置读取失败，按默认（启用+包内目录）：%s", exc)
+        return True, ""
+
+
+def to_skill(loaded: LoadedSkill) -> Skill:
+    """`LoadedSkill`（claude-for 语料装配结果）→ router/tool_rag/synthesizer 认识的 `Skill`。
+
+    `render=None` → 走 LLM 路径（不像 tracker 那样确定性渲染）；`system_prompt`/`tool_hint`
+    是 LoadedSkill 的绑定方法（已包好本项目纪律段 + 工具名对照 + 能力限制，见 skill_loader）。
+    """
+    return Skill(
+        id=loaded.id,
+        name=loaded.name,
+        description=loaded.description,
+        system_prompt=loaded.system_prompt,
+        render=None,
+        tool_hint=loaded.tool_hint(),
+        tool_families=loaded.tool_families,
+        should_rag=loaded.should_rag,
+        strategy=loaded.strategy,
+        report_type=loaded.report_type,
+        catalog_line=loaded.catalog_line,
+    )
+
+
+_LIBRARY_ENABLED, _LIBRARY_DIR = _library_config()
+
+
+def load_skills(library_dir: str | None = None) -> list[Skill]:
+    """装载 claude-for 技能库（`SKILL_LIBRARY_ENABLED=false` → 空列表）。"""
+    if not _LIBRARY_ENABLED:
+        return []
+    return [to_skill(ls) for ls in load_library(library_dir or _LIBRARY_DIR or None)]
+
+
+# 导入技能的原始装配结果（web API 的技能页详情直接读它；`SKILLS` 只保留图需要的部分）
+LIBRARY: list[LoadedSkill] = load_library(_LIBRARY_DIR or None) if _LIBRARY_ENABLED else []
+
+# 可扩展注册表：内置 skill + claude-for 技能库；新报告技能在 BUILTIN_SKILLS 追加一条 entry 即可被 router 命中。
+SKILLS: list[Skill] = BUILTIN_SKILLS + [to_skill(ls) for ls in LIBRARY]

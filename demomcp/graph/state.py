@@ -21,6 +21,7 @@ class GraphState(TypedDict, total=False):
     intent: str | None              # "market" | "report" | "compare"
     skill: str | None               # 命中的报告 skill id（如 ai_supply_chain_tracker）/ None
     out_of_scope: bool
+    forced_skill: str | None        # 调用方指定的 skill id（前端技能页「快速使用」）→ router 跳过 skill 判定
 
     # Tool/RAG 产出
     retrieval_plan: list[dict[str, Any]]   # 本轮拟调用的工具（id/name/arguments）

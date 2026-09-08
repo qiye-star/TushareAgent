@@ -216,6 +216,7 @@ class Agent:
         *,
         history: list[dict[str, Any]] | None = None,
         mode: str = "agent",
+        forced_skill: str | None = None,
         on_text=None,
         on_thinking=None,
         on_tool=None,
@@ -237,7 +238,14 @@ class Agent:
             "want_more": False,
             "rag_retrieved": False,
             "no_progress_count": 0,
+            # 前端技能页「快速使用」指定的报告 skill（router 据此跳过 skill 判定）
+            "forced_skill": forced_skill or None,
         }
+        # 强制 skill 与 quick 模式冲突时按 agent 跑（决策 O1 的后端保护）：quick 模式 skills=[]，
+        # 会让 _resolve_skill 找不到指定技能而静默降级成普通问答——那不是用户点「快速使用」的预期。
+        if forced_skill and mode == "quick":
+            _log.info("forced_skill=%s 与 quick 模式冲突，按 agent 模式执行", forced_skill)
+            mode = "agent"
         loop_cap = 1 if mode == "quick" else self._config.max_iterations
         try:
             # _get_graph（经 _get_tool_defs → tools.list_tools()）挪进 try 块：其抛出的异常（如

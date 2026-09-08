@@ -801,7 +801,11 @@ def test_skill_registry_tracker_template() -> None:
     assert get_skill("ai_supply_chain_tracker") is not None
     assert get_skill("not_a_skill") is None
     assert get_skill(None) is None
-    assert [s.id for s in SKILLS] == ["ai_supply_chain_tracker"]
+    # SKILLS = 内置（tracker 恒为首位）+ claude-for 导入技能库（63 条，见 tests/test_skill_loader.py）
+    ids = [s.id for s in SKILLS]
+    assert ids[0] == "ai_supply_chain_tracker"
+    assert len(ids) == len(set(ids)), "skill id 必须全局唯一"
+    assert get_skill("china-dcf") is not None, "导入技能应可按 id 命中"
 
     text = _tracker_system()
     for marker in ("板块概览", "标的池行情速览", "关键公告", "业绩预告异动", "产业链催化", "一句话研判", "数据未接入", "不编造"):

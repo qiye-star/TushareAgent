@@ -32,7 +32,14 @@ from demomcp.agents.agent import Agent
 from demomcp.config.logging import configure_logging, get_logger, log_chat_turn
 from demomcp.config.mcp_toggle import load_mcp_enabled, save_mcp_enabled
 from demomcp.config.settings import Settings
+from demomcp.config.skill_toggle import (
+    is_skill_enabled,
+    load_skill_toggles,
+    save_skill_enabled,
+)
 from demomcp.db.store import ChatHistoryStore, build_store
+from demomcp.graph.skill_loader import CAPABILITY_NOTE
+from demomcp.graph.skills import LIBRARY, get_skill
 from demomcp.interfaces.tool_provider import ToolProvider
 from demomcp.providers.llm.deepseek import DeepSeekLLMClient
 from demomcp.providers.tools.mcp import mcp_tool_provider
@@ -151,6 +158,7 @@ class ChatRequest(BaseModel):
     session_id: str | None = None
     model: str | None = None  # 前端「深度思考」可传 deepseek-reasoner
     mode: str | None = None  # 前端「快速问答/智能体模式」选择器；"quick" | "agent"，非法值/空回落 agent
+    skill: str | None = None  # 前端技能页「快速使用」指定的报告 skill id；未知/停用 → 忽略（不 500）
 
 
 def _sse(kind: str, data: dict[str, Any]) -> str:
@@ -332,6 +340,10 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         await emit("process", {"kind": kind, **data})
 
     chat_mode = req.mode if req.mode in ("quick", "agent") else "agent"  # 非法值兜底成 agent，不让前端传坏值搞崩图选择
+    # 技能页「快速使用」指定的 skill：未知 id 或已被停用 → 忽略（按普通路由跑，不 500 也不假装用了）
+    forced_skill = req.skill if (req.skill and get_skill(req.skill) and is_skill_enabled(req.skill)) else None
+    if req.skill and not forced_skill:
+        logger.warning("忽略无效/已停用的 skill：%s", req.skill)
 
     async def _run_agent() -> None:
         llm = DeepSeekLLMClient(
@@ -356,6 +368,7 @@ async def chat(req: ChatRequest) -> StreamingResponse:
                 req.message,
                 history=history,
                 mode=chat_mode,
+                forced_skill=forced_skill,
                 on_text=on_text,
                 on_thinking=on_thinking,
                 on_tool=on_tool,
@@ -590,6 +603,73 @@ async def set_mcp_source(source_id: str, req: McpSourceRequest) -> dict[str, Any
             return resp.json()
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"MCP 网关不可达：{exc}") from exc
+
+
+# ---- 报告技能库（claude-for vendored 语料 → graph/skills.py）：前端「技能」页 ----
+
+
+def _skill_row(loaded: Any, toggles: dict[str, bool]) -> dict[str, Any]:
+    """技能列表行：只放卡片要用的字段（正文 body 单独走详情端点，别塞进列表）。"""
+    return {
+        "id": loaded.id,
+        "name": loaded.name,
+        "raw_name": loaded.raw_name,
+        "domain": loaded.domain,
+        "domain_label": loaded.domain_label,
+        "catalog_line": loaded.catalog_line,
+        "report_type": loaded.report_type,
+        "enabled": toggles.get(loaded.id, True),
+        "files_limited": loaded.files_limited,
+        "should_rag": loaded.should_rag,
+        "source_families": list(loaded.source_families),
+    }
+
+
+@app.get("/api/skills")
+async def list_skills() -> dict[str, Any]:
+    """技能清单（按域分组由前端做）。技能库被 SKILL_LIBRARY_ENABLED=false 关掉时返回空列表。"""
+    toggles = load_skill_toggles()
+    return {
+        "skills": [_skill_row(ls, toggles) for ls in LIBRARY],
+        "domains": [
+            {"id": d, "label": next(ls.domain_label for ls in LIBRARY if ls.domain == d),
+             "count": sum(1 for ls in LIBRARY if ls.domain == d)}
+            for d in dict.fromkeys(ls.domain for ls in LIBRARY)
+        ],
+    }
+
+
+@app.get("/api/skills/{skill_id}")
+async def get_skill_detail(skill_id: str) -> dict[str, Any]:
+    """技能详情：正文 Markdown + 工具名对照 + 能力限制说明（供详情侧滑渲染）。"""
+    loaded = next((ls for ls in LIBRARY if ls.id == skill_id), None)
+    if loaded is None:
+        raise HTTPException(status_code=404, detail=f"未知技能：{skill_id}")
+    row = _skill_row(loaded, load_skill_toggles())
+    row.update(
+        {
+            "description": loaded.description,
+            "body_markdown": loaded.body,
+            "tool_mapping": [{"old": o, "new": n} for o, n in loaded.tool_mapping],
+            "capability_note": CAPABILITY_NOTE if loaded.files_limited else None,
+            "tool_families": list(loaded.tool_families),
+        }
+    )
+    return row
+
+
+class SkillToggleRequest(BaseModel):
+    enabled: bool
+
+
+@app.post("/api/skills/{skill_id}/toggle")
+async def toggle_skill(skill_id: str, req: SkillToggleRequest) -> dict[str, Any]:
+    """启用/停用单个技能：停用后不再进 router 清单（现读，无需重启），也不能被「快速使用」强制指定。"""
+    loaded = next((ls for ls in LIBRARY if ls.id == skill_id), None)
+    if loaded is None:
+        raise HTTPException(status_code=404, detail=f"未知技能：{skill_id}")
+    save_skill_enabled(skill_id, req.enabled)
+    return {"id": skill_id, "enabled": is_skill_enabled(skill_id)}
 
 
 @app.post("/api/rag/retrieve")

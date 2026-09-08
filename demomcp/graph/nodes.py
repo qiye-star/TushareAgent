@@ -16,6 +16,7 @@ from langchain_core.runnables import RunnableConfig
 from demomcp.config.logging import get_logger
 from demomcp.graph.prompts import (
     REWRITE_SYSTEM,
+    ROUTER_BASE,
     select_system,
     synth_system,
     today_context,
@@ -178,19 +179,36 @@ async def _rag_retrieve(
     return evidence, list(chunks)
 
 
+def _intent_event(intent: str, skill_id: str | None, out_of_scope: bool, skills: list[Skill] | None) -> dict[str, Any]:
+    """router 的 process 事件载荷；带 skill_name 让前端直接显示「命中技能：xxx」（不用再查 /api/skills）。"""
+    skill = _resolve_skill(skill_id, skills)
+    return {
+        "intent": intent,
+        "skill": skill_id,
+        "skill_name": skill.name if skill else None,
+        "out_of_scope": out_of_scope,
+        "strategy": _strategy(intent, skill),
+    }
+
+
 def make_router(llm: Any, *, max_tokens: int, skills: list[Skill] | None = None):
-    """意图识别 + 越界判断 + 报告 skill 命中：非流式分类，返回 {intent, skill, out_of_scope}。"""
+    """意图识别 + 越界判断 + 报告 skill 命中：非流式分类，返回 {intent, skill, out_of_scope}。
+
+    `state["forced_skill"]`（前端技能页「快速使用」指定）能解析到已启用技能时：**不把技能清单拼进
+    system**（省 ~4KB/次）、只做 intent + 越界判定，skill 直接用指定值。
+    """
 
     async def router(state: GraphState, config: RunnableConfig) -> dict[str, Any]:
         intent = "market"
-        skill_id: str | None = None
+        forced = _resolve_skill(state.get("forced_skill"), skills)
+        skill_id: str | None = forced.id if forced else None
         out_of_scope = False
         usage = None
         try:
             resp = await llm.chat(
                 messages=state.get("messages") or [],
                 tools=[],
-                system=f"{build_router_system(skills)}\n\n{today_context()}",
+                system=f"{ROUTER_BASE if forced else build_router_system(skills)}\n\n{today_context()}",
                 max_tokens=max_tokens,
                 stream=False,
                 temperature=0.0,
@@ -203,16 +221,17 @@ def make_router(llm: Any, *, max_tokens: int, skills: list[Skill] | None = None)
                 if isinstance(body, dict):
                     if body.get("intent") in _VALID_INTENTS:
                         intent = body["intent"]
-                    s = body.get("skill")
-                    skill_id = s if isinstance(s, str) and _resolve_skill(s, skills) else None
+                    if not forced:  # forced 优先：LLM 这轮没看到技能清单，它填的 skill 不可信
+                        s = body.get("skill")
+                        skill_id = s if isinstance(s, str) and _resolve_skill(s, skills) else None
                     out_of_scope = bool(body.get("out_of_scope", False))
             except (ValueError, json.JSONDecodeError):
                 pass
         except Exception as exc:  # noqa: BLE001 - LLM 调用异常就默认 market 继续，让下游节点各自兜底 → 自愈
             _log.warning("router llm.chat failed: %s: %s", type(exc).__name__, exc)
-            await _emit_process(config, "intent", {"intent": intent, "skill": skill_id, "out_of_scope": out_of_scope, "strategy": _strategy(intent, _resolve_skill(skill_id, skills))})
+            await _emit_process(config, "intent", _intent_event(intent, skill_id, out_of_scope, skills))
             return {"intent": intent, "skill": skill_id, "out_of_scope": out_of_scope, "usage": usage}
-        await _emit_process(config, "intent", {"intent": intent, "skill": skill_id, "out_of_scope": out_of_scope, "strategy": _strategy(intent, _resolve_skill(skill_id, skills))})
+        await _emit_process(config, "intent", _intent_event(intent, skill_id, out_of_scope, skills))
         return {"intent": intent, "skill": skill_id, "out_of_scope": out_of_scope, "usage": usage}
 
     return router

@@ -6,6 +6,7 @@ import {
   PencilSimple,
   Plugs,
   Plus,
+  Sparkle,
   SidebarSimple,
   Trash,
 } from '@phosphor-icons/react'
@@ -97,6 +98,17 @@ export function Sidebar({
           </button>
           <button
             type="button"
+            title="技能"
+            onClick={() => onViewChange('skills')}
+            className={cn(
+              'flex h-9 w-full items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800',
+              view === 'skills' && 'bg-primary-50 text-primary-600 dark:bg-primary-500/10 dark:text-primary-300',
+            )}
+          >
+            <Sparkle size={17} />
+          </button>
+          <button
+            type="button"
             title="设置"
             onClick={() => onViewChange('settings')}
             className={cn(
@@ -180,6 +192,19 @@ export function Sidebar({
         </button>
         <button
           type="button"
+          onClick={() => onViewChange('skills')}
+          className={cn(
+            'flex items-center gap-2.5 rounded-lg px-3 py-2 text-[13.5px] font-medium transition-colors',
+            view === 'skills'
+              ? 'bg-primary-50 text-primary-700 dark:bg-primary-500/10 dark:text-primary-300'
+              : 'text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800',
+          )}
+        >
+          <Sparkle size={17} className={cn(view === 'skills' && 'text-primary-600 dark:text-primary-400')} />
+          技能
+        </button>
+        <button
+          type="button"
           onClick={() => onViewChange('settings')}
           className={cn(
             'flex items-center gap-2.5 rounded-lg px-3 py-2 text-[13.5px] font-medium transition-colors',
@@ -193,7 +218,7 @@ export function Sidebar({
         </button>
       </nav>
 
-      {view === 'settings' ? (
+      {view === 'settings' || view === 'skills' ? (
         <div className="flex-1" />
       ) : view === 'report' ? (
         <>

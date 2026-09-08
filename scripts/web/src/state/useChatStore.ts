@@ -18,9 +18,12 @@ type ChatState = {
   controller: AbortController | null
   /** 快速问答 / 智能体模式选择器（Composer 下方两按钮），发消息时读取，不落 session、刷新重置为 agent。 */
   chatMode: 'quick' | 'agent'
+  /** 技能页「快速使用」选中的报告技能：**强制本轮**使用，发送后自动清除（决策 D12）。 */
+  pendingSkill: { id: string; name: string } | null
 
   setSessionId: (id: string) => void
   setChatMode: (m: 'quick' | 'agent') => void
+  setPendingSkill: (s: { id: string; name: string } | null) => void
 
   /** Begin a turn and stream a message; resolves with the session id used. */
   send: (query: string, opts?: { session_id?: string | null }) => Promise<string>
@@ -137,15 +140,22 @@ export const useChatStore = create<ChatState>((set, get) => {
     isStreaming: false,
     controller: null,
     chatMode: 'agent',
+    pendingSkill: null,
 
     setSessionId: (id) => set({ sessionId: id }),
     setChatMode: (m) => set({ chatMode: m }),
+    // 选中技能时顺手切到智能体模式：快速问答（mode=quick）会禁用技能，后端虽有保护但
+    // 界面上仍显示「快速问答」会误导（决策 O1 的前端一半）。
+    setPendingSkill: (s) => set(s ? { pendingSkill: s, chatMode: 'agent' } : { pendingSkill: null }),
 
     send: async (query, opts) => {
       const sessionId = get().sessionId
       const turnId = nextId()
       const controller = new AbortController()
       const baseSession = opts?.session_id ?? sessionId ?? null
+      // 强制技能只作用于本轮：先取出再清空，避免下一条消息意外沿用（决策 D12）
+      const skill = get().pendingSkill
+      if (skill) set({ pendingSkill: null })
 
       set((s) => ({
         controller,
@@ -178,6 +188,7 @@ export const useChatStore = create<ChatState>((set, get) => {
             message: query,
             session_id: baseSession,
             mode: get().chatMode,
+            skill: skill?.id ?? null,
           },
           (evt) => applyEvent(turnId, evt),
           controller.signal,
