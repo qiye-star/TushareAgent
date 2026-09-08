@@ -7,7 +7,7 @@ import type { RawSse } from './types'
  */
 export async function streamChat(
   url: string,
-  body: { message: string; session_id?: string | null; model?: string | null },
+  body: { message: string; session_id?: string | null; model?: string | null; mode?: 'quick' | 'agent' | null },
   onEvent: (evt: RawSse) => void,
   signal: AbortSignal,
 ): Promise<void> {

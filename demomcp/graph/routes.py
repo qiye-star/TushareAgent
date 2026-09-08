@@ -26,6 +26,8 @@ def make_route_after_tool_rag(max_iterations: int):
             return "fallback"  # 硬失败（node_error/parallel_race/无证据）→ 兜底
         if state.get("want_more") and int(state.get("loop_index") or 0) < max_iterations:
             return "tool_rag"  # LLM 还要取数且未到上限 → 自环
+        if state.get("direct_answer") and not state.get("evidence") and not state.get("rag_chunks"):
+            return "synthesizer"  # 零证据但 LLM 直接作答（上下文回显等）→ 直接定稿，不误导性兜底
         if not state.get("evidence") and not state.get("rag_chunks"):
             return "fallback"  # 无任何可用证据 → 兜底
         return "synthesizer"  # 已足够 / 到上限且有证据 → 生成

@@ -16,7 +16,23 @@ def test_settings_defaults_offline(make_settings) -> None:
     assert s.system_prompt == DEFAULT_SYSTEM_PROMPT
     assert s.mcp_timeout == 30.0
     assert s.mcp_retries == 2
+    assert s.mcp_keepalive_interval == 45.0
+    assert s.tool_pool_hot_start is True
     assert s.is_configured is False
+
+
+def test_mcp_keepalive_and_hot_start_from_env(make_settings, monkeypatch) -> None:
+    monkeypatch.setenv("DEMO_MCP_KEEPALIVE", "0")
+    monkeypatch.setenv("TOOL_POOL_HOT_START", "false")
+    s = make_settings()
+    assert s.mcp_keepalive_interval == 0.0  # 0=关闭保活
+    assert s.tool_pool_hot_start is False  # 关闭热启动
+
+    monkeypatch.setenv("DEMO_MCP_KEEPALIVE", "60")
+    monkeypatch.setenv("TOOL_POOL_HOT_START", "true")
+    s2 = make_settings()
+    assert s2.mcp_keepalive_interval == 60.0
+    assert s2.tool_pool_hot_start is True
 
 
 def test_settings_from_env(make_settings, monkeypatch) -> None:
@@ -51,45 +67,31 @@ def test_effective_database_url_override(make_settings) -> None:
     assert s.effective_database_url == "sqlite+aiosqlite:///tmp/chat.db"
 
 
-def test_tushare_mcp_url_default(make_settings) -> None:
+def test_mcp_gateway_url_default_points_at_local_gateway(make_settings) -> None:
+    """取数唯一入口是网关；上游源（TUSHARE_MCP_URL/WIND_*）已迁往 mcp_gateway/.env，这里不该再有。"""
     s = make_settings()
-    assert s.tushare_mcp_url == "https://api.tushare.pro/mcp/"
+    assert s.mcp_gateway_url == "http://127.0.0.1:8766/mcp"
+    for gone in ("tushare_mcp_url", "wind_api_key", "wind_enabled", "wind_configured"):
+        assert not hasattr(s, gone), f"{gone} 应已随网关化移除（配置只在 mcp_gateway/.env 一处）"
 
 
-def test_tushare_mcp_url_from_env(make_settings, monkeypatch) -> None:
-    monkeypatch.setenv("TUSHARE_MCP_URL", "http://10.0.0.1:9000/mcp")
-    s = make_settings()
-    assert s.tushare_mcp_url == "http://10.0.0.1:9000/mcp"
+def test_mcp_gateway_url_from_env(make_settings, monkeypatch) -> None:
+    monkeypatch.setenv("MCP_GATEWAY_URL", "http://gw:9000/mcp")
+    assert make_settings().mcp_gateway_url == "http://gw:9000/mcp"
 
 
-def test_wind_defaults_offline(make_settings) -> None:
-    s = make_settings()
-    assert s.wind_api_key == ""
-    assert s.wind_enabled is True
-    assert s.wind_configured is False
+def test_wind_usage_guide_injected_only_when_wind_tools_present(make_settings) -> None:
+    """万得用法约定现在由「本轮工具清单里有没有 wind_ 前缀工具」决定，不再看 demomcp 的配置。"""
+    from demomcp.agents.agent import base_system_for
+    from demomcp.interfaces.types import ToolSpec
 
+    cfg = make_settings()
+    base = cfg.system_prompt
+    assert base_system_for(cfg, []) == base  # 无工具：逐字节一致
+    assert base_system_for(cfg, [ToolSpec(name="daily")]) == base  # 只有 Tushare 工具：不提万得
 
-def test_wind_configured_gate(make_settings) -> None:
-    # key 为空 → 未装配
-    assert make_settings().wind_configured is False
-    # 有 key → 装配
-    assert make_settings(wind_api_key="ak_x").wind_configured is True
-    # key + WIND_ENABLED=false → 未装配
-    assert make_settings(wind_api_key="ak_x", wind_enabled=False).wind_configured is False
-
-
-def test_effective_system_prompt_mentions_wind_only_when_configured(make_settings) -> None:
-    base = make_settings().system_prompt
-    assert make_settings().effective_system_prompt == base  # 未装配：逐字节一致
-    prompt = make_settings(wind_api_key="ak_x").effective_system_prompt
-    assert "wind_" in prompt
+    prompt = base_system_for(cfg, [ToolSpec(name="daily"), ToolSpec(name="wind_list_apis")])
     assert len(prompt) > len(base)
-
-
-def test_effective_system_prompt_injects_wind_usage_guide(make_settings) -> None:
-    prompt = make_settings(wind_api_key="ak_x").effective_system_prompt
-    # WIND_USAGE_GUIDE 的关键约定被注入
     assert "Wind 格式" in prompt
     assert "自然语言" in prompt
-    assert "wind_search_stocks" in prompt
-    assert "不要用" in prompt or "不要**用" in prompt
+    assert "wind_list_apis" in prompt and "wind_get_api_info" in prompt and "wind_query" in prompt

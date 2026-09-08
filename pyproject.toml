@@ -44,7 +44,7 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["demomcp*", "mcp_server*"]
+include = ["demomcp*", "mcp_server*", "mcp_gateway*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -52,6 +52,14 @@ testpaths = ["tests"]
 
 [tool.ruff]
 target-version = "py311"
+
+# external_sources/ 是**独立部署**的免费数据源 server（自带 requirements.txt，不属于本包）。
+# 那里的两条模式是刻意的，不是疏漏：
+#   BLE001 每个 @server.tool() 必须把任何异常兜成 {"error": …} 返回——让 MCP server 因为
+#          东方财富改版就整进程崩掉，比返回一条错误消息糟糕得多；
+#   DTZ011 date.today() 用于 CLI 的默认起止日（本地自然日语义），此处不需要时区感知。
+[tool.ruff.lint.per-file-ignores]
+"external_sources/*.py" = ["BLE001", "DTZ011"]
 
 [[tool.uv.index]]
 name = "aliyun"

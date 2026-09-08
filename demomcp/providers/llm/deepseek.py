@@ -71,12 +71,15 @@ class DeepSeekLLMClient:
             "model": self._model,
             "messages": msgs,
             "max_tokens": max_tokens,
-            "tool_choice": "auto",
         }
         if temperature is not None:
             kwargs["temperature"] = temperature
         if tools:
             kwargs["tools"] = [to_openai_tool(t) for t in tools]
+            # tool_choice 只能在有 tools 时传：OpenAI 兼容 API 在 tools 缺失/为空时收到
+            # tool_choice 会报错（此前 tool_defs 恒非空，这条路径直到 NullToolProvider
+            # 让 tools=[] 变得可达才第一次触发——异常被 tool_rag 吞成 fallback 兜底一句话）。
+            kwargs["tool_choice"] = "auto"
 
         if stream:
             return await self._chat_stream(kwargs, on_text, on_thinking)

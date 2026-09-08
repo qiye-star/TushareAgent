@@ -112,7 +112,13 @@ export function AgentMessage({ turn, canRegenerate, onRegenerate }: Props) {
         title="引用来源"
         description={turn.query ? `针对「${turn.query}」` : undefined}
       >
-        <CitationList sources={turn.sources} activeIndex={activeIndex} hideHeader />
+        <CitationList
+          sources={turn.sources}
+          activeIndex={activeIndex}
+          hideHeader
+          query={turn.query}
+          createdAt={turn.createdAt}
+        />
       </SideSheet>
     </div>
   )

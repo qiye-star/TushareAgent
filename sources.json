@@ -1,0 +1,8 @@
+{
+  "wind": {
+    "enabled": true
+  },
+  "tushare": {
+    "enabled": true
+  }
+}

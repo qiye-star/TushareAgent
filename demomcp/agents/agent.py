@@ -11,7 +11,12 @@ import asyncio
 from typing import Any
 
 from demomcp.config.logging import get_logger
-from demomcp.config.settings import Settings
+from demomcp.config.settings import (
+    FREE_SOURCE_USAGE_GUIDE,
+    IFIND_USAGE_GUIDE,
+    WIND_USAGE_GUIDE,
+    Settings,
+)
 from demomcp.graph.builder import build_research_graph
 from demomcp.graph.skills import SKILLS
 from demomcp.graph.state import GraphState
@@ -21,6 +26,44 @@ from demomcp.interfaces.tool_provider import ToolProvider
 from demomcp.interfaces.types import META_TOOL_NAMES, AgentResult
 
 _log = get_logger("agents")
+
+# 快速问答模式追加进 base_system 的后缀：只允许一轮取数，且要求模型在回答里自证身份、引导切换智能体模式。
+# 不放进 graph/prompts.py——那是 select_system/synth_system 两种模式共享的公共文件，这段只属于快速模式。
+QUICK_MODE_SUFFIX = (
+    "\n\n【快速问答模式】本轮你只能查一次数据（最多一组并行工具调用），看到返回后必须直接总结作答，"
+    "不能再发起新一轮取数。回答开头先声明「（快速问答模式）」，并在结尾提示：如需更全面/更深入的多轮分析，"
+    "可切换到「智能体模式」重新提问。"
+)
+
+
+WIND_TOOL_PREFIX = "wind_"
+IFIND_TOOL_PREFIX = "ifind_"
+
+# 免费源（AkShare / 财经新闻）的工具名**没有前缀**，只能按哨兵名判断在不在本轮清单里。
+# 挑的是这两个源独有、且不与 Tushare 官方接口名撞车的名字（Tushare 那边是 daily/stock_basic 这类）。
+FREE_SOURCE_SENTINELS = frozenset({"get_market_overview", "get_market_headlines", "search_stock"})
+
+
+def base_system_for(cfg: Settings, tool_defs: list[Any]) -> str:
+    """基础 system_prompt + 各数据源的用法约定，**按本轮工具清单里真的有什么**决定追加哪几段。
+
+    从前这是 `Settings.effective_system_prompt`，按 demomcp 自己的 WIND_API_KEY 判断；现在上游源全部
+    由 MCP 网关持有并按源开关，demomcp 读不到（也不该读）源配置——直接看网关这一轮实际暴露了什么：
+    网关把某个源关掉，下一次建图时它的工具消失，提示词也就自动不再讲它的用法，两边永不打架。
+
+    每段用法约定都不是可有可无的文字：三家的参数风格互不兼容（Tushare 结构化字段 + 带后缀代码；
+    万得自然语言 + Wind 后缀代码；iFind 单个自然语言 query；免费源 6 位裸代码），
+    不注入对应那段，LLM 就会拿另一家的习惯传参而稳定取不到数。
+    """
+    names = [getattr(spec, "name", "") for spec in tool_defs]
+    base = cfg.system_prompt
+    if any(n.startswith(WIND_TOOL_PREFIX) for n in names):
+        base += "\n\n" + WIND_USAGE_GUIDE
+    if any(n.startswith(IFIND_TOOL_PREFIX) for n in names):
+        base += "\n\n" + IFIND_USAGE_GUIDE
+    if FREE_SOURCE_SENTINELS.intersection(names):
+        base += "\n\n" + FREE_SOURCE_USAGE_GUIDE
+    return base
 
 
 def _load_catalog(path: str) -> dict[str, Any] | None:
@@ -51,7 +94,7 @@ class Agent:
         self._tools = tools
         self._config = config
         self._tool_defs: list[Any] | None = None
-        self._graph: Any | None = None
+        self._graphs: dict[str, Any] = {}  # 按 mode（agent/quick）分片缓存编译好的图
         self._retriever: Any | None = None
         self._tool_catalog: dict[str, Any] | None = None
 
@@ -105,8 +148,10 @@ class Agent:
                 self._retriever = None
         return self._retriever
 
-    async def _get_graph(self) -> Any:
-        if self._graph is None:
+    async def _get_graph(self, mode: str = "agent") -> Any:
+        """按 mode 分片缓存编译好的图：agent/quick 共享同一个 build_research_graph，仅传参不同
+        （base_system 后缀 / max_iterations / skills），nodes.py/routes.py/builder.py 本体不感知 mode。"""
+        if mode not in self._graphs:
             tool_defs = await self._get_tool_defs()
             retriever = await self._get_retriever()
             cfg = self._config
@@ -120,21 +165,33 @@ class Agent:
                     catalog=self._tool_catalog, skill_tools=skill_tools,
                 )
 
-            self._graph = build_research_graph(
+            system = base_system_for(cfg, tool_defs)  # 各源用法约定按本轮实际暴露的工具决定
+            if mode == "quick":
+                base_system = system + QUICK_MODE_SUFFIX
+                max_iterations = 1
+                # 快速模式不生成结构化投研报告：传空注册表而非 None——
+                # _resolve_skill 对 None 会回退全局 SKILLS（2026-09-07 审查：原先 skills=None 实际未禁用）
+                skills = []
+            else:
+                base_system = system
+                max_iterations = cfg.max_iterations
+                skills = SKILLS
+
+            self._graphs[mode] = build_research_graph(
                 self._llm,
                 self._tools,
                 tool_defs,
                 max_tokens=cfg.ds_max_tokens,
                 disclaimer=cfg.disclaimer,
-                base_system=cfg.effective_system_prompt,
+                base_system=base_system,
                 retriever=retriever,
-                skills=SKILLS,
+                skills=skills,
                 curate=curate,
-                max_iterations=cfg.max_iterations,
+                max_iterations=max_iterations,
             )
-        return self._graph
+        return self._graphs[mode]
 
-    def _error_result(self, messages: list[dict[str, Any]], cause: BaseException) -> AgentResult:
+    def _error_result(self, messages: list[dict[str, Any]], cause: BaseException, mode: str = "agent") -> AgentResult:
         self._log_error(cause)
         return AgentResult(
             final_text=f"处理失败：{cause}。请稍后重试。\n\n{self._config.disclaimer}",
@@ -142,6 +199,7 @@ class Agent:
             messages=messages,
             tool_results=[],
             usage=None,
+            mode=mode,
         )
 
     @staticmethod
@@ -157,6 +215,7 @@ class Agent:
         user_input: str,
         *,
         history: list[dict[str, Any]] | None = None,
+        mode: str = "agent",
         on_text=None,
         on_thinking=None,
         on_tool=None,
@@ -179,13 +238,17 @@ class Agent:
             "rag_retrieved": False,
             "no_progress_count": 0,
         }
-        graph = await self._get_graph()
+        loop_cap = 1 if mode == "quick" else self._config.max_iterations
         try:
+            # _get_graph（经 _get_tool_defs → tools.list_tools()）挪进 try 块：其抛出的异常（如
+            # MCP 断线竞态）必须走本方法统一的 _error_result/_log_error（带 exc_info 的结构化日志），
+            # 而不是逃逸到调用方（web.py）更外层、日志没有 traceback 的通用兜底（2026-09-07 事故）。
+            graph = await self._get_graph(mode)
             result = await graph.ainvoke(
                 state,
                 config={
                     # 保证我们设定的循环上限先于 LangGraph 默认 recursion_limit（10007）触发
-                    "recursion_limit": self._config.max_iterations + 20,
+                    "recursion_limit": loop_cap + 20,
                     "configurable": {"on_text": on_text, "on_thinking": on_thinking, "on_tool": on_tool, "on_process": on_process},
                 },
             )
@@ -196,9 +259,9 @@ class Agent:
             cancel = [e for e in leaves if isinstance(e, asyncio.CancelledError)]
             if cancel:
                 raise cancel[0]
-            return self._error_result(messages, leaves[-1] if leaves else eg)
+            return self._error_result(messages, leaves[-1] if leaves else eg, mode)
         except Exception as exc:  # noqa: BLE001 - 图普通异常归一为优雅结果
-            return self._error_result(messages, exc)
+            return self._error_result(messages, exc, mode)
         return AgentResult(
             final_text=result.get("final_answer") or "",
             stopped_reason=result.get("stopped_reason") or "end_turn",
@@ -207,4 +270,5 @@ class Agent:
             usage=result.get("usage"),
             citations=result.get("citations") or [],
             structured=result.get("structured"),
+            mode=mode,
         )

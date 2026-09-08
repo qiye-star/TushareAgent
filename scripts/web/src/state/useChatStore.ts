@@ -16,8 +16,11 @@ type ChatState = {
   turns: ChatTurn[]
   isStreaming: boolean
   controller: AbortController | null
+  /** 快速问答 / 智能体模式选择器（Composer 下方两按钮），发消息时读取，不落 session、刷新重置为 agent。 */
+  chatMode: 'quick' | 'agent'
 
   setSessionId: (id: string) => void
+  setChatMode: (m: 'quick' | 'agent') => void
 
   /** Begin a turn and stream a message; resolves with the session id used. */
   send: (query: string, opts?: { session_id?: string | null }) => Promise<string>
@@ -29,7 +32,10 @@ type ChatState = {
   removeTurn: (id: string) => void
   removeTurnsFrom: (id: string) => void
   /** Replay a flat message log (role/content) into turn objects. */
-  loadHistory: (sessionId: string, messages: { role: string; content: string; is_error?: boolean }[]) => void
+  loadHistory: (
+    sessionId: string,
+    messages: { role: string; content: string; is_error?: boolean; created_at?: string | null }[],
+  ) => void
   /** Replay persisted per-turn blobs with full thinking/tool/ReAct/structured data. */
   loadTurns: (sessionId: string, blobs: TurnBlob[]) => void
 }
@@ -130,8 +136,10 @@ export const useChatStore = create<ChatState>((set, get) => {
     turns: [],
     isStreaming: false,
     controller: null,
+    chatMode: 'agent',
 
     setSessionId: (id) => set({ sessionId: id }),
+    setChatMode: (m) => set({ chatMode: m }),
 
     send: async (query, opts) => {
       const sessionId = get().sessionId
@@ -148,6 +156,7 @@ export const useChatStore = create<ChatState>((set, get) => {
             id: turnId,
             sessionId: baseSession ?? '',
             query,
+            createdAt: new Date().toISOString(),
             status: 'streaming',
             thinking: '',
             answer: '',
@@ -168,6 +177,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           {
             message: query,
             session_id: baseSession,
+            mode: get().chatMode,
           },
           (evt) => applyEvent(turnId, evt),
           controller.signal,
@@ -229,6 +239,7 @@ export const useChatStore = create<ChatState>((set, get) => {
             id: nextId(),
             sessionId,
             query: m.content,
+            createdAt: m.created_at ?? undefined,
             status: 'done',
             thinking: '',
             answer: '',
@@ -258,6 +269,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           id: nextId(),
           sessionId,
           query: b.query,
+          createdAt: b.created_at,
           status: isError ? 'error' : 'done',
           thinking: b.thinking ?? '',
           answer: cleanAnswer(b.answer ?? ''),

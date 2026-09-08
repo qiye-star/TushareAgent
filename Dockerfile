@@ -1,6 +1,8 @@
 # demo-mcp — LLM+MCP 数据对话助手（Web/CLI）
 # 构建上下文只含 demo-mcp/（零外部路径）。应用经 TUSHARE_MCP_URL 连接 Tushare 官方 MCP；
 # 内置 mcp_server/（本地代理→每接口工具）默认停用，仅作后备。
+# 同一份镜像也用于 mcp_gateway/（独立部署的 MCP 网关，见 docker-compose.yml 的 mcp-gateway service，
+# 只是换 CMD），所以这里把 mcp_gateway/ 也一并拷进去，不单独建 Dockerfile。
 
 # ---------- 阶段 1：构建 React 前端（scripts/web/dist） ----------
 FROM node:20-alpine AS webbuild
@@ -23,8 +25,9 @@ ENV UV_LINK_MODE=copy \
 
 # 依赖清单先入镜像（利用层缓存）
 COPY pyproject.toml uv.lock ./
-# 应用源码（含内置 mcp_server/）
+# 应用源码（含内置 mcp_server/ 与独立部署的 mcp_gateway/）
 COPY mcp_server/ ./mcp_server/
+COPY mcp_gateway/ ./mcp_gateway/
 COPY demomcp/ ./demomcp/
 COPY scripts/ ./scripts/
 # 前端构建产物（web.py 静态挂载 scripts/web/dist）

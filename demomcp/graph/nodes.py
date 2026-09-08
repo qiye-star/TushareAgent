@@ -13,10 +13,12 @@ from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 
+from demomcp.config.logging import get_logger
 from demomcp.graph.prompts import (
     REWRITE_SYSTEM,
     select_system,
     synth_system,
+    today_context,
 )
 from demomcp.graph.skills import SKILLS, Skill, build_router_system
 from demomcp.graph.state import GraphState
@@ -30,8 +32,20 @@ from demomcp.rag.query_build import (
 )
 from demomcp.rag.schemas import RetrievalPlan
 
+_log = get_logger("graph.nodes")
+
 _VALID_INTENTS = ("market", "report", "compare")
 _MAX_EVIDENCE_CHARS = 2000  # 证据摘要长度上限，控制 Synthesis 上下文体积
+_MAX_SOURCE_RAW = 20000  # 前端来源卡展示用的完整返回上限（只走 structured.sources，不进 LLM 上下文）
+_DIRECT_ANSWER_MIN_CHARS = 30  # 零证据停止轮「直接作答」的最小长度：短句（含测试里的「数据已足。」）不足以定稿
+# 取数类提示词引导模型在数据取不到时「如实说明」，所以这些措辞出现在零证据停止轮 = 在承认失败而非作答 → 一律拒绝
+_DIRECT_ANSWER_REJECT_PHRASES = (
+    "我不知道用", "无法识别", "无法找到", "查不到", "没有找到", "找不到",
+    "无法回答", "不知道", "无法获取", "无法取到", "取不到", "无权限", "未接入",
+    # 2026-09-07 审查：窄词表漏判的变体措辞（「暂时无法查询/权限不足/抱歉」等均不命中旧表），
+    # 零证据停止轮的「抱歉」不可能出现在正常作答里（正常作答走合成器，不走此通道）
+    "暂时无法", "无法查询", "查询不到", "没能查询", "抱歉", "权限不足", "权限受限", "没有权限",
+)
 
 
 def _cf(config: RunnableConfig, key: str) -> Any:
@@ -132,7 +146,8 @@ async def _rag_retrieve(
     funnel: dict[str, Any] = {}
     try:
         chunks = await retriever.retrieve(plan, on_funnel=funnel.update)
-    except Exception:  # noqa: BLE001 - 检索失败/retriever None → 空
+    except Exception as exc:  # noqa: BLE001 - 检索失败/retriever None → 空
+        _log.debug("rag_retrieve failed: %s: %s", type(exc).__name__, exc)
         chunks = []
     if chunks is None:
         chunks = []
@@ -153,7 +168,7 @@ async def _rag_retrieve(
             {
                 "source_type": "rag",
                 "source": source,
-                "content": chunk.text[: _MAX_EVIDENCE_CHARS],
+                "content": _truncate_head_tail(chunk.text),
                 "cite": cite.model_dump() if hasattr(cite, "model_dump") else cite,
             }
         )
@@ -175,7 +190,7 @@ def make_router(llm: Any, *, max_tokens: int, skills: list[Skill] | None = None)
             resp = await llm.chat(
                 messages=state.get("messages") or [],
                 tools=[],
-                system=build_router_system(skills),
+                system=f"{build_router_system(skills)}\n\n{today_context()}",
                 max_tokens=max_tokens,
                 stream=False,
                 temperature=0.0,
@@ -193,7 +208,8 @@ def make_router(llm: Any, *, max_tokens: int, skills: list[Skill] | None = None)
                     out_of_scope = bool(body.get("out_of_scope", False))
             except (ValueError, json.JSONDecodeError):
                 pass
-        except Exception:  # noqa: BLE001 - LLM 调用异常就默认 market 继续，让下游节点各自兜底 → 自愈
+        except Exception as exc:  # noqa: BLE001 - LLM 调用异常就默认 market 继续，让下游节点各自兜底 → 自愈
+            _log.warning("router llm.chat failed: %s: %s", type(exc).__name__, exc)
             await _emit_process(config, "intent", {"intent": intent, "skill": skill_id, "out_of_scope": out_of_scope, "strategy": _strategy(intent, _resolve_skill(skill_id, skills))})
             return {"intent": intent, "skill": skill_id, "out_of_scope": out_of_scope, "usage": usage}
         await _emit_process(config, "intent", {"intent": intent, "skill": skill_id, "out_of_scope": out_of_scope, "strategy": _strategy(intent, _resolve_skill(skill_id, skills))})
@@ -247,13 +263,14 @@ def make_rewrite_query(llm: Any | None = None, *, max_tokens: int = 256):
                 resp = await llm.chat(
                     messages=[{"role": "user", "content": q}],
                     tools=[],
-                    system=REWRITE_SYSTEM,
+                    system=f"{REWRITE_SYSTEM}\n\n{today_context()}",
                     max_tokens=max_tokens,
                     stream=False,
                     temperature=0.0,
                 )
                 rewritten = (resp.text or "").strip()
-            except Exception:  # noqa: BLE001 - LLM 改写失败 → 确定性兜底
+            except Exception as exc:  # noqa: BLE001 - LLM 改写失败 → 确定性兜底
+                _log.warning("rewrite_query llm.chat failed: %s: %s", type(exc).__name__, exc)
                 rewritten = ""
         if not rewritten:
             rewritten = _deterministic_rewrite(q)
@@ -282,7 +299,6 @@ def make_tool_rag(
     """
 
     async def tool_rag(state: GraphState, config: RunnableConfig) -> dict[str, Any]:
-        on_text = _cf(config, "on_text")
         on_thinking = _cf(config, "on_thinking")
         on_tool = _cf(config, "on_tool")
         intent = state.get("intent") or "market"
@@ -317,6 +333,12 @@ def make_tool_rag(
         )
         do_rag = (retriever is not None) and _should_rag(intent, skill) and not rag_retrieved  # RAG 每轮只第一次
         try:
+            # 本节点只选工具/判断是否收尾，正常路径不产出最终答案（resp.text 不在本函数被读取）——
+            # 任何流式 content 都按思考过程处理（on_text 接 on_thinking），不接答案通道；
+            # 否则模型在「数据已足够、收尾」那一轮吐出的文字会被当成答案先流一遍，
+            # 之后又被 synthesizer 的真实生成顶掉，表现为「答案被第二次生成覆盖」。
+            # 唯一例外：下方零证据停止轮的「直接作答」（回显上一轮答案等），经 _accept_as_direct_answer
+            # 判定后转正为答案（见 f2d8b91b 线上事故——同题二答回显被当成"没取到数"误导兜底）。
             resp = await llm.chat(
                 messages=messages,
                 tools=revealed,
@@ -324,10 +346,11 @@ def make_tool_rag(
                 max_tokens=max_tokens,
                 stream=True,
                 temperature=0.0,
-                on_text=on_text,
+                on_text=on_thinking,
                 on_thinking=on_thinking,
             )
-        except Exception:  # noqa: BLE001 - LLM 选工具失败 → 仍先试 RAG；有累积证据则合成，否则 node_error
+        except Exception as exc:  # noqa: BLE001 - LLM 选工具失败 → 仍先试 RAG；有累积证据则合成，否则 node_error
+            _log.warning("tool_rag select-tools llm.chat failed (round=%d): %s: %s", round_no, type(exc).__name__, exc)
             rag_evidence, raw_chunks = (await _rag_retrieve(retriever, state, intent, skill, config)) if do_rag else ([], [])
             if rag_evidence:
                 evidence.extend(rag_evidence)
@@ -362,16 +385,24 @@ def make_tool_rag(
             n_tool = sum(1 for e in evidence if e.get("source_type") == "tool")
             await _emit_process(config, "aggregate", {"tool": n_tool, "rag": len(rag_chunks), "total": len(evidence), "round": round_no})
             await _emit_process(config, "loop_turn", {"round": round_no, "tools": [], "status": "stop", "evidence": len(evidence)})
+            direct_answer: str | None = None
             if evidence or rag_chunks:
                 fallback_reason = None  # 已足够 → 合成器
             else:
-                fallback_reason = "no_progress" if not tool_results else "no_evidence"
+                # 零证据停止轮：LLM 可能「直接作答」（最常见：同题二答时回显上一轮答案，见 f2d8b91b），
+                # 也可能在承认取不到/不会用工具。前者定稿下发（取代误导性兜底），后者诚实兜底。
+                if resp.stop_reason == "end_turn" and _accept_as_direct_answer(resp.text or ""):
+                    direct_answer = (resp.text or "").strip()
+                    fallback_reason = None  # 直接作答 → 合成器定稿
+                else:
+                    fallback_reason = "no_progress" if not tool_results else "no_evidence"
             return {
                 "messages": messages,
                 "tool_results": tool_results,
                 "evidence": evidence,
                 "rag_chunks": rag_chunks,
                 "fallback_reason": fallback_reason,
+                "direct_answer": direct_answer,
                 "want_more": False,
                 "loop_index": loop_index,
                 "no_progress_count": 0,
@@ -387,7 +418,8 @@ def make_tool_rag(
         tool_coros = [_safe_call_tool(tools, tu.name, tu.input) for tu in resp.tool_uses]
         try:
             gathered = await asyncio.gather(rag_coro, *tool_coros)
-        except Exception:  # noqa: BLE001 - 并行一路（非取消）异常 → 有累积证据则合成，否则 parallel_race；取消仍透传
+        except Exception as exc:  # noqa: BLE001 - 并行一路（非取消）异常 → 有累积证据则合成，否则 parallel_race；取消仍透传
+            _log.warning("tool_rag parallel gather failed (round=%d): %s: %s", round_no, type(exc).__name__, exc)
             return {
                 "messages": messages,
                 "tool_results": tool_results,
@@ -421,7 +453,14 @@ def make_tool_rag(
             parsed = _parse_tool_result(content)
             if parsed is not None:
                 if _is_usable_data(parsed):
-                    entry: dict[str, Any] = {"source_type": "tool", "source": tu.name, "content": content[:_MAX_EVIDENCE_CHARS]}
+                    entry: dict[str, Any] = {
+                        "source_type": "tool",
+                        "source": tu.name,
+                        "content": _truncate_head_tail(content),
+                        # raw 只供前端来源卡渲染表格；_evidence_digest 不读它 → 不占 LLM 上下文。
+                        # 语义截断保证是有效 JSON（大表也能渲染成真表格），而非硬切在 JSON 中途。
+                        "raw": _truncate_json_raw(content),
+                    }
                     params = parsed.get("source", {}).get("params") if isinstance(parsed.get("source"), dict) else None
                     if isinstance(params, dict):
                         entry["params"] = params
@@ -430,7 +469,14 @@ def make_tool_rag(
                 else:
                     validation_errors.append(_friendly_signal(parsed) or content)  # 友好校验失败，first-class
             elif content != "[]":
-                evidence.append({"source_type": "tool", "source": tu.name, "content": content[:_MAX_EVIDENCE_CHARS]})
+                evidence.append(
+                    {
+                        "source_type": "tool",
+                        "source": tu.name,
+                        "content": _truncate_head_tail(content),
+                        "raw": _truncate_json_raw(content),
+                    }
+                )
         if pairs:
             messages.extend(llm.tool_results_messages(pairs))
         await _emit_process(config, "params", {"request": request_params, "round": round_no})
@@ -485,6 +531,80 @@ def _friendly_signal(parsed: dict[str, Any]) -> str | None:
     return None
 
 
+def _truncate_head_tail(content: str, limit: int = _MAX_EVIDENCE_CHARS) -> str:
+    """长内容保首尾、中段折叠：daily 类接口按 trade_date 降序，首尾恰是区间两端
+    （起止交易日/基期日）。切头会让「全年涨跌幅」类计算缺基期值（线上事故：243 行 index_daily
+    截后只剩 2024-12 约 8 行，模型如实报「数据未接入」而无法计算）。摘要仍限 limit，只加一行省略标记。"""
+    if len(content) <= limit:
+        return content
+    half = limit // 2
+    return (
+        f"{content[:half]}\n\n……中间省略约 {len(content) - limit} 字符（如需完整/尾部数据请缩小查询区间）……\n\n"
+        f"{content[-half:]}"
+    )
+
+
+def _data_container(body: Any) -> list | None:
+    """从解析后的返回里定位「行列表」容器，供 _truncate_json_raw 按行语义截断。
+
+    Tushare 形态：裸数组、{data:[…]}、{data:{columns,rows}}（列信封）、裸对象；不是行列表（如纯 k/v）
+    返回 None——此时无从按行截断，只能回退硬切。
+    """
+    if isinstance(body, list):
+        return body
+    if isinstance(body, dict):
+        data = body.get("data")
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict) and isinstance(data.get("rows"), list):
+            return data["rows"]
+    return None
+
+
+def _truncate_json_raw(content: str, limit: int = _MAX_SOURCE_RAW) -> str:
+    """raw 只供前端来源卡渲染表格，必须保持**有效 JSON**——不能像 content 那样切头切尾或硬切。
+
+    官方/代理返回很大（daily 一年 243 行 ≈50k 字符）时，`content[:limit]` 恰好截在 JSON 中途，
+    JSON.parse 失败 → 前端回退成裸文本（线上坑：表格预览变成一坨裸 JSON）。
+    这里把「硬切」改成「语义截断」：超限才解析 → 定位行容器 → 二分出能放进 limit 的**完整行数** n，
+    只保留前 n 行、其余丢弃，重排回紧凑 JSON——始终可解析，前端能渲染成真表格（只少了尾部几行）。
+
+    小数据走快路径（len <= limit 原样返回），零解析开销。
+    """
+    if len(content) <= limit:
+        return content
+    try:
+        body = json.loads(content)
+    except (ValueError, TypeError):
+        # 本身不是合法 JSON（如权限提示/上游报错纯文本）→ 语义截断无从谈起，维持原硬切
+        return content[:limit]
+    container = _data_container(body)
+    if container is None or not container:
+        return content[:limit]
+
+    # 每次探针都用原容器的完整副本重建前缀，避免原地缩短后长度参考错乱
+    orig = list(container)  # 浅拷贝指针列表即可；元素（行 dict/list）从不改动
+
+    def probe_size(n: int) -> int:
+        container[:] = orig[:n]
+        return len(json.dumps(body, ensure_ascii=False, separators=(",", ":")))
+
+    total = len(orig)
+    lo, hi, best = 1, total, 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if probe_size(mid) <= limit:
+            best = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    container[:] = orig[:best]
+    if isinstance(body, dict) and isinstance(body.get("row_count"), int):
+        body["row_count"] = best  # 行数已截断，同步 row_count，避免表头与数据行不一致
+    return json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+
+
+
 def make_synthesizer(llm: Any, *, max_tokens: int, disclaimer: str, base_system: str,
                      skills: list[Skill] | None = None):
     """投研生成与格式化：依据证据摘要总结，标注来源，并附免责声明；skill 命中时用该 skill 的系统提示词。"""
@@ -504,6 +624,22 @@ def make_synthesizer(llm: Any, *, max_tokens: int, disclaimer: str, base_system:
         citations = sorted({str(e.get("source")) for e in evidence if e.get("source")})
         pending = _structured_metadata(state, strategy)
 
+        # —— 直接作答短路：tool_rag 停止轮零证据但 LLM 直接作答（回显上一轮答案等；text 已在选工具
+        # 轮经 on_thinking 流过思考区）。不再调 LLM、不接 on_text（避免答案区重复流式；答案区由 done 的
+        # structured.answer 填充）；skill.render 也不跑——空证据只会渲染满篇「数据未接入」。 ——
+        if state.get("direct_answer") and not evidence and not state.get("rag_chunks"):
+            answer = state["direct_answer"].strip()
+            if disclaimer and disclaimer not in answer:
+                answer = f"{answer}\n\n{disclaimer}"
+            return {
+                "final_answer": answer,
+                "citations": citations,
+                "messages": list(state.get("messages") or []),  # 选工具轮已 append assistant 帧，勿再追加
+                "stopped_reason": "end_turn",
+                "usage": state.get("usage"),
+                "structured": _structured(answer, intent, strategy, [], pending, skill_id),
+            }
+
         # —— 纯模板渲染：skill 提供 render 时不调 LLM，直接由代码把 evidence 渲染成六段 ——
         if skill and skill.render:
             answer = _render_answer(skill, state, evidence, user_msg, disclaimer)
@@ -519,7 +655,7 @@ def make_synthesizer(llm: Any, *, max_tokens: int, disclaimer: str, base_system:
             }
 
         evidence_digest = _evidence_digest(evidence)
-        system_prompt = skill.system_prompt(base_system) if skill else synth_system(base_system, intent=intent)
+        system_prompt = (skill.system_prompt(base_system) if skill else synth_system(base_system, intent=intent)) + "\n\n" + today_context()
         try:
             resp = await llm.chat(
                 messages=[{"role": "user", "content": user_msg + "\n\n可用数据：\n" + evidence_digest}],
@@ -531,7 +667,8 @@ def make_synthesizer(llm: Any, *, max_tokens: int, disclaimer: str, base_system:
                 on_text=on_text,
                 on_thinking=on_thinking,
             )
-        except Exception:  # noqa: BLE001 - 生成失败 → 兜底文案（fallback）
+        except Exception as exc:  # noqa: BLE001 - 生成失败 → 兜底文案（fallback）
+            _log.warning("synthesizer llm.chat failed: %s: %s", type(exc).__name__, exc)
             answer = "未能生成投研总结（处理异常），请稍后重试。"
             if disclaimer:
                 answer = f"{answer}\n\n{disclaimer}"
@@ -546,6 +683,48 @@ def make_synthesizer(llm: Any, *, max_tokens: int, disclaimer: str, base_system:
                 "structured": _structured(answer, intent, strategy, evidence, pending, skill_id),
             }
         answer = (resp.text or "").strip() or "已取到数据，但未能生成总结。"
+        if _is_degenerate_answer(answer):
+            # 疑似拒答/空话（曾在线上出现：证据充分却只回"抱歉，我无法完成这个请求。"）：重试一次，
+            # 且不接 on_text——避免刚才那句拒答已经流给前端后，重试的字符又叠上去、越看越乱。
+            try:
+                retry_resp = await llm.chat(
+                    messages=[{"role": "user", "content": user_msg + "\n\n可用数据：\n" + evidence_digest}],
+                    tools=[],
+                    system=system_prompt,
+                    max_tokens=max_tokens,
+                    stream=True,
+                    temperature=0.0,
+                    on_text=None,
+                    on_thinking=None,
+                )
+                retry_answer = (retry_resp.text or "").strip()
+            except Exception as exc:  # noqa: BLE001 - 重试异常按"仍然拒答"处理，走下面的诚实兜底
+                _log.warning("synthesizer retry llm.chat failed: %s: %s", type(exc).__name__, exc)
+                retry_resp, retry_answer = None, ""
+            if retry_answer and not _is_degenerate_answer(retry_answer):
+                resp, answer = retry_resp, retry_answer
+            else:
+                # 重试仍拒答：不再包装成"成功"。不拼万得来源声明——没有真实总结内容时标来源反而误导，
+                # 正是这次事故的样子；disclaimer 仍保留（通用声明，不误导）。sources/citations 不清空：
+                # 证据是真实取到的，取数本身没失败，只是文字总结失败，用户仍应能在引用来源里核对。
+                answer = (
+                    f"已取到 {len(evidence)} 条数据（可在下方「查看引用来源」中核对），"
+                    "但未能生成可靠的文字总结，请尝试换个问法或缩小问题范围后重新提问。"
+                    if evidence
+                    else "未能生成可靠的文字总结，请尝试换个问法或缩小问题范围后重新提问。"
+                )
+                if disclaimer and disclaimer not in answer:
+                    answer = f"{answer}\n\n{disclaimer}"
+                if on_text:
+                    await on_text(answer)
+                return {
+                    "final_answer": answer,
+                    "citations": citations,
+                    "messages": list(state.get("messages") or []),
+                    "stopped_reason": "fallback",
+                    "usage": state.get("usage"),
+                    "structured": _structured(answer, intent, strategy, evidence, pending, skill_id),
+                }
         if disclaimer and disclaimer not in answer:
             answer = f"{answer}\n\n{disclaimer}"
             if on_text:
@@ -577,7 +756,7 @@ def make_fallback(*, disclaimer: str, skills: list[Skill] | None = None):
         if state.get("out_of_scope"):
             text = "超出可查询范围：无法为该标的/维度提供可靠数据。请确认标的范围或查询维度，或改用支持的接口。"
         elif state.get("fallback_reason") == "no_progress":
-            text = "未能识别出可用的取数工具，建议换个问法，或明确标的与要查的指标。"
+            text = "本轮未调用取数工具且没有获取到可校验的数据，无法给出有依据的回答。建议换个问法，或明确标的与要查的指标。"
         elif state.get("fallback_reason") == "no_evidence":
             text = "未能取到可靠数据（可能无对应数据或接口无权限），请核对标的/范围与权限，或改用其它接口。"
         elif state.get("fallback_reason") == "node_error":
@@ -607,6 +786,39 @@ def make_fallback(*, disclaimer: str, skills: list[Skill] | None = None):
     return fallback
 
 
+_REFUSAL_MARKERS = ("抱歉，我无法", "很抱歉，我无法", "对不起，我无法", "我无法完成", "我不能完成", "无法完成这个请求", "我不能提供")
+
+
+def _is_degenerate_answer(text: str) -> bool:
+    """判定这段文本是不是"拒答"而非基于证据的真实总结（如线上曾出现的"抱歉，我无法完成这个请求。"）。
+
+    只认典型的道歉/拒绝措辞 + 篇幅很短，不单纯按长度/是否含数字判断——真实答案有时也很简短
+    （比如一句定性结论），单纯"短就当拒答"会误伤这类正常输出。代价是模型换一种说法拒答时会漏判，
+    但比误伤正常短答案更安全。
+    """
+    stripped = text.strip()
+    if not stripped:
+        return True
+    return len(stripped) <= 40 and any(m in stripped for m in _REFUSAL_MARKERS)
+
+
+def _accept_as_direct_answer(text: str) -> bool:
+    """零证据停止轮的「直接作答」判定：非空、非拒答、不含「取不到」类措辞；长度门限对含数字的短句放行。
+
+    判拒答不看长度：合成路径对拒答有重试+诚实兜底，而直接作答路径是原样透传（无重试），
+    任何拒答措辞都不应成为 final_answer。长度门限只为挡「好的。」这类无信息短句——
+    带数字的短句（如「2024年沪深300涨跌幅为14.68%。」21 字符）是完整答案，不应弹回兜底（2026-09-07 审查）。
+    """
+    stripped = (text or "").strip()
+    if _is_degenerate_answer(stripped):
+        return False
+    if any(m in stripped for m in _REFUSAL_MARKERS):  # 长度无关的长拒答也硬拒
+        return False
+    if len(stripped) < _DIRECT_ANSWER_MIN_CHARS and not any(ch.isdigit() for ch in stripped):
+        return False
+    return not any(p in stripped for p in _DIRECT_ANSWER_REJECT_PHRASES)
+
+
 def _evidence_uses_wind(evidence: list[dict[str, Any]]) -> bool:
     """是否存在来自万得（wind_ 前缀工具）的证据 → 用于追加来源声明。"""
     return any(str(e.get("source", "")).startswith("wind_") for e in evidence)
@@ -619,7 +831,8 @@ def _render_answer(skill: Skill, state: GraphState, evidence: list[dict[str, Any
             evidence,
             {"query": user_msg, "date": datetime.now(UTC).date().isoformat(), "request": state.get("request_params") or {}},
         )
-    except Exception:  # noqa: BLE001 - 渲染器异常 → 兜底文案，保图不崩
+    except Exception as exc:  # noqa: BLE001 - 渲染器异常 → 兜底文案，保图不崩
+        _log.warning("skill.render failed: %s: %s", type(exc).__name__, exc)
         answer = "未能生成投研快报（渲染异常），请稍后重试。"
     answer = answer.strip() or "已取到数据，但未能渲染快报。"
     if disclaimer and disclaimer not in answer:
@@ -648,13 +861,14 @@ def _evidence_digest(evidence: list[dict[str, Any]]) -> str:
 
 
 def _structured_metadata(state: GraphState, strategy: str) -> dict[str, Any]:
-    """metadata：归一化后的请求参数 + 校验错误（first-class）。"""
+    """metadata：归一化后的请求参数 + 校验错误（first-class）+ 是否直接作答（取证用）。"""
     req = state.get("request_params") or {}
     return {
         "request": req,
         "validation": {"errors": list(state.get("validation_errors") or []), "normalized": bool(req)},
         "tool_results": len(state.get("tool_results") or []),
         "rag_chunks": len(state.get("rag_chunks") or []),
+        "direct_answer": bool(state.get("direct_answer")),
     }
 
 
@@ -690,7 +904,8 @@ def _structured(
                  "inline": cite.get("inline", "")}
             )
         else:
-            sources.append({"type": "tool", "title": e.get("source"), "data": e.get("content", "")[:200], "params": e.get("params")})
+            # data 下发完整返回（raw），前端据此解析成表格；截断只保留在喂 LLM 的 content 上
+            sources.append({"type": "tool", "title": e.get("source"), "data": e.get("raw") or e.get("content", ""), "params": e.get("params")})
             citations.append({"ref_index": i, "type": "tool", "title": e.get("source")})
         claims.append({"text": f"{e.get('source')} 提供的数据/信息", "source": e.get("source")})
     return {"answer": answer, "intent": intent, "skill": skill, "strategy": strategy, "sources": sources, "citations": citations, "claims": claims, "metadata": metadata}

@@ -1,0 +1,13 @@
+# 免费源独立进程的依赖 —— **故意不进主仓库 pyproject.toml**。
+# 主仓库刻意精简（重依赖走 rag-full 这类可选 extra），而 akshare 会拖进 pandas/lxml/beautifulsoup
+# 一大串；这两个 server 是独立进程，依赖也就留在它们自己这儿。
+#
+# 装法（建议单独一个 venv，别污染主项目 .venv）：
+#   python -m venv external_sources/.venv
+#   external_sources/.venv/Scripts/pip install -r external_sources/requirements.txt   # Windows
+#   external_sources/.venv/bin/pip install -r external_sources/requirements.txt       # Linux/macOS
+
+mcp>=1.28,<2
+akshare>=1.14.0
+pandas>=1.5.0
+lxml>=4.9.0

@@ -109,6 +109,8 @@ export type ChatTurn = {
   id: string
   sessionId: string
   query: string
+  /** 本轮发生时间（ISO）。直播轮次由前端打点，重载轮次取后端 blob.created_at；老数据可能没有。 */
+  createdAt?: string
   status: TurnStatus
   /** Accumulated from `thinking` events (streamed). */
   thinking: string
@@ -139,6 +141,8 @@ export type RawSse = { event: string; data: any }
 
 // ---- persisted per-turn blob (GET /api/sessions/{id}/turns) ----
 export type TurnBlob = {
+  /** 后端落库时间（ISO）；本字段是后加的，历史轮次没有。 */
+  created_at?: string
   query: string
   thinking: string
   steps: { kind: string; data: any }[]

@@ -117,6 +117,19 @@ export function formatTime(iso: string | null): string {
   })
 }
 
+/**
+ * ISO → 2026/09/04。与 formatTime 同样对裸 ISO 串补 Z（见上方注释：后端 SQLite
+ * CURRENT_TIMESTAMP 是无时区的 UTC，不补 Z 会被当成本地时间、整体偏一个时区）。
+ * 无值/不可解析返回 ''，调用方据此隐藏日期行。
+ */
+export function formatDate(iso?: string | null): string {
+  if (!iso) return ''
+  const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/.test(iso) ? iso : `${iso}Z`
+  const d = new Date(normalized)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' })
+}
+
 /** Map a DeepSeek stopped_reason to a friendly Chinese label. */
 export function stoppedReasonLabel(reason: string | null): string {
   const map: Record<string, string> = {
@@ -127,4 +140,10 @@ export function stoppedReasonLabel(reason: string | null): string {
     error: '出错',
   }
   return reason ? map[reason] || reason : ''
+}
+
+/** 涨跌着色：A 股惯例红涨绿跌（rose=涨 / emerald=跌 / zinc=零与缺失），单一来源。 */
+export function pctClass(n: number | null | undefined): string {
+  if (n == null || n === 0) return 'text-zinc-500 dark:text-zinc-400'
+  return n > 0 ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'
 }

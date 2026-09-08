@@ -62,6 +62,10 @@ def test_web_retrieve_endpoint(monkeypatch) -> None:
         return stub
 
     monkeypatch.setattr("demomcp.rag.runtime.build_runtime_retriever", fake_build)
+    # 本测试不 monkeypatch 工具池：关掉热启动 + 快报定时（5s 启动补跑会建真实 MCP 连接并写 latest.json），
+    # 保持离线确定（不向 real Tushare 发起后台连接）
+    monkeypatch.setenv("TOOL_POOL_HOT_START", "false")
+    monkeypatch.setenv("QUICKREPORT_AUTO", "false")
     with TestClient(app) as client:
         resp = client.post(
             "/api/rag/retrieve",

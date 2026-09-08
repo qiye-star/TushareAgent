@@ -94,9 +94,160 @@ async def test_no_tool_call_fallback(make_settings) -> None:
     result = await agent.run("比亚迪")
 
     assert result.stopped_reason == "fallback"
-    assert "未能识别出可用的取数工具" in result.final_text
+    assert "未调用取数工具且没有获取到可校验的数据" in result.final_text
     assert result.tool_results == []
     assert len(mock.calls) == 3  # router + rewrite_query + tool选择
+
+
+# ---- 零证据停止轮「直接作答」（同题二答回显，f2d8b91b 线上事故） ----
+
+_ECHO_HISTORY = [
+    {"role": "user", "content": "请计算 2024 年沪深 300 指数的全年涨跌幅"},
+    {"role": "assistant", "content": "我来查行情。",
+     "tool_calls": [{"id": "c0", "type": "function", "function": {"name": "stock_price_range", "arguments": "{}"}}]},
+    {"role": "tool", "tool_call_id": "c0", "content": '[{"trade_date": "20241231", "close": 3934.91}]'},
+    {"role": "assistant", "content": "（快速问答模式）2024 年沪深 300 指数全年涨跌幅为 **14.68%**。"},
+]
+
+_ECHO_ANSWER = (
+    "（快速问答模式）2024 年沪深 300 指数全年涨跌幅为 **14.68%**。计算依据："
+    "2024 年首个交易日（2024-01-02）收盘 3386.35 点、最后一个交易日（2024-12-31）收盘 3934.91 点。"
+)
+
+
+async def test_no_tool_direct_answer_echo_passthrough(make_settings) -> None:
+    """同题二答回显（f2d8b91b 事故）：history 已含上一轮完整交换，LLM 不再调工具、直接回显上一轮
+    答案 → end_turn 定稿（免调合成器 LLM），而非「未识别出可用工具」的误导兜底。"""
+    mock = MockLLM([
+        _router_response('{"intent":"market","out_of_scope":false}'),
+        ChatResponse(stop_reason="end_turn", text="沪深300 2024 涨跌幅"),  # rewrite_query
+        ChatResponse(stop_reason="end_turn", text=_ECHO_ANSWER),  # select：无 tool_uses + 直接作答
+    ])
+    agent = Agent(llm=mock, tools=FakeToolProvider(SPECS, {}), config=make_settings())
+    result = await agent.run("请计算 2024 年沪深 300 指数的全年涨跌幅", history=_ECHO_HISTORY, mode="agent")
+
+    assert result.stopped_reason == "end_turn"
+    assert result.mode == "agent"
+    assert "14.68%" in result.final_text
+    assert "未调用取数工具" not in result.final_text
+    assert len(mock.calls) == 3  # router + rewrite_query + select；合成器免调
+    assert result.structured is not None
+    assert result.structured["answer"] == result.final_text
+    assert result.structured["metadata"]["direct_answer"] is True
+    assert result.structured["sources"] == []
+    assert result.citations == []
+
+
+async def test_no_tool_direct_answer_quick_variant(make_settings) -> None:
+    """同一回显在 quick 模式下同样定稿（select 轮 system 含「快速问答模式」后缀）。"""
+    mock = MockLLM([
+        _router_response('{"intent":"market","out_of_scope":false}'),
+        ChatResponse(stop_reason="end_turn", text="沪深300 2024 涨跌幅"),
+        ChatResponse(stop_reason="end_turn", text=_ECHO_ANSWER),
+    ])
+    agent = Agent(llm=mock, tools=FakeToolProvider(SPECS, {}), config=make_settings())
+    result = await agent.run("请计算 2024 年沪深 300 指数的全年涨跌幅", history=_ECHO_HISTORY, mode="quick")
+
+    assert result.stopped_reason == "end_turn"
+    assert result.mode == "quick"
+    assert "14.68%" in result.final_text
+    assert len(mock.calls) == 3
+    assert "快速问答模式" in mock.calls[2]["system"]  # quick 后缀仍在 select 轮生效
+
+
+async def test_no_tool_failure_phrasing_still_falls_back(make_settings) -> None:
+    """零证据停止轮输出含「取不到」类措辞的长句（>=30 字符）→ 仍诚实兜底，不转正为答案。"""
+    mock = MockLLM([
+        _router_response('{"intent":"market","out_of_scope":false}'),
+        ChatResponse(stop_reason="end_turn", text="沪深300 2024 涨跌幅"),
+        ChatResponse(stop_reason="end_turn", text="我没有找到 2024 年沪深 300 指数的相关行情数据，请稍后重试或改用其他数据源。"),
+    ])
+    result = await Agent(llm=mock, tools=FakeToolProvider(SPECS, {}), config=make_settings()).run("沪深300 2024 涨跌幅", mode="agent")
+    assert result.stopped_reason == "fallback"
+    assert "未调用取数工具且没有获取到可校验的数据" in result.final_text
+    assert len(mock.calls) == 3
+
+
+async def test_no_tool_short_text_still_falls_back(make_settings) -> None:
+    """30 字符下限：极短停止文本不转正为答案（test_empty_evidence_fallback 的「数据已足。」同理）。"""
+    mock = MockLLM([
+        _router_response('{"intent":"market","out_of_scope":false}'),
+        ChatResponse(stop_reason="end_turn", text="沪深300 2024 涨跌幅"),
+        ChatResponse(stop_reason="end_turn", text="好的。"),
+    ])
+    result = await Agent(llm=mock, tools=FakeToolProvider(SPECS, {}), config=make_settings()).run("沪深300 2024 涨跌幅", mode="agent")
+    assert result.stopped_reason == "fallback"
+    assert len(mock.calls) == 3
+
+
+async def test_direct_answer_ignored_when_evidence_exists(make_settings) -> None:
+    """证据在场时停止轮走正常合成器路径（长回显文本不参与），metadata.direct_answer=False。"""
+    tools = FakeToolProvider(
+        SPECS, {"stock_price_range": ToolResult(content='[{"close": 1604.9}]', is_error=False)}
+    )
+    mock = MockLLM([
+        _router_response('{"intent":"market","out_of_scope":false}'),
+        ChatResponse(stop_reason="end_turn", text="比亚迪 最近价格 区间"),  # rewrite_query
+        _tool_use_response("c1", "stock_price_range", {"name": "比亚迪"}),
+        ChatResponse(stop_reason="end_turn", text="数据已足。区间表现已给出如下。"),  # 停止判定（有证据）
+        ChatResponse(stop_reason="end_turn", text="比亚迪区间约 1604.9 元。"),  # synthesizer
+    ])
+    result = await Agent(llm=mock, tools=tools, config=make_settings()).run("比亚迪最近价格", mode="agent")
+
+    assert result.stopped_reason == "end_turn"
+    assert len(mock.calls) == 5  # 合成器正常调用
+    assert "1604" in result.final_text
+    assert result.structured["metadata"]["direct_answer"] is False
+
+
+def test_route_direct_answer_ordering() -> None:
+    from demomcp.graph.routes import make_route_after_tool_rag
+
+    route = make_route_after_tool_rag(10)
+    assert route({"direct_answer": "x", "want_more": False, "evidence": [], "rag_chunks": []}) == "synthesizer"
+    # fallback_reason 优先级最高（direct_answer 与硬失败同存时不可能发生，但保序）
+    assert route({"fallback_reason": "no_progress", "direct_answer": "x", "want_more": False, "evidence": [], "rag_chunks": []}) == "fallback"
+    # 有证据时直接作答不生效（走正常合成）
+    assert route({"direct_answer": "x", "want_more": False, "evidence": [{"source_type": "tool"}], "rag_chunks": []}) == "synthesizer"
+    # 无 direct_answer 无证据 → 兜底（原行为）
+    assert route({"want_more": False, "evidence": [], "rag_chunks": []}) == "fallback"
+
+
+def _desc_daily(start: str = "20241231", days: int = 60) -> str:
+    """生成降序每日数据（模拟 index_daily 降序返回），保证 >2000 字符。"""
+    from datetime import date, timedelta
+
+    end = date.fromisoformat(start)
+    rows = []
+    for i in range(days):
+        d = end - timedelta(days=i)
+        rows.append(f'{{"trade_date": "{d.strftime("%Y%m%d")}", "close": {3934.91 - i * 0.1:.2f}}}')
+    return "[" + ", ".join(rows) + "]"
+
+
+async def test_evidence_truncation_keeps_head_tail(make_settings) -> None:
+    """Bug 2 回归：长返回（降序 daily，>2000 字符）截断保留首尾两端——合成器能同时拿到区间
+    两端日期（基期/期末，否则「全年涨跌幅」算不出）；中部日期在摘要折叠、raw 仍全量供前端。"""
+    content = _desc_daily()
+    assert len(content) > 2000
+    tools = FakeToolProvider(SPECS, {"stock_price_range": ToolResult(content=content, is_error=False)})
+    mock = MockLLM([
+        _router_response('{"intent":"market","out_of_scope":false}'),
+        ChatResponse(stop_reason="end_turn", text="沪深300 2024 涨跌幅"),
+        _tool_use_response("c1", "stock_price_range", {"name": "沪深300"}),
+        _stop_response(),
+        ChatResponse(stop_reason="end_turn", text="两端数据都已取到。"),
+    ])
+    result = await Agent(llm=mock, tools=tools, config=make_settings()).run("沪深300 2024 涨跌幅", mode="agent")
+
+    assert result.stopped_reason == "end_turn"
+    synth_content = mock.calls[4]["messages"][0]["content"]  # synthesizer user message
+    assert "20241231" in synth_content  # 首（期末）
+    assert "20241102" in synth_content  # 尾（第 60 行）
+    assert "中间省略" in synth_content
+    assert "20241204" not in synth_content  # 中部日期在摘要中被折叠
+    data = result.structured["sources"][0]["data"]
+    assert "20241204" in data  # raw 全量供前端来源卡
 
 
 async def test_empty_evidence_fallback(make_settings) -> None:
@@ -762,6 +913,29 @@ async def test_tool_rag_reveals_only_curated_subset(make_settings) -> None:
     assert len(rnames) <= 4 + 4  # meta(4) + cap(4)
 
 
+async def test_tool_rag_always_reveals_wind_meta_trio(make_settings) -> None:
+    """万得懒发现三件套（wind_list_apis/wind_get_api_info/wind_query）恒被揭示，
+    不受 tool_max_revealed 收紧、也不受查询相关性打分影响——它们和 Tushare 的 meta 走同一机制。"""
+    full = [
+        ToolSpec("list_apis"), ToolSpec("get_api_info"), ToolSpec("query"), ToolSpec("stock_basic"),
+        ToolSpec("wind_list_apis"), ToolSpec("wind_get_api_info"), ToolSpec("wind_query"),
+        ToolSpec("daily"), ToolSpec("bond_basic"),
+    ]
+    tools = FakeToolProvider(full, {})
+    mock = MockLLM([
+        _router_response('{"intent":"market","out_of_scope":false}'),
+        ChatResponse(stop_reason="end_turn", text="随便问点什么"),
+        ChatResponse(stop_reason="end_turn", text="没有工具可用。"),
+    ])
+    agent = Agent(llm=mock, tools=tools, config=make_settings(tool_max_revealed=0))
+    await agent.run("和金融毫不相关的一句话")
+
+    revealed = mock.calls[2]["tools"]
+    rnames = {t.name for t in revealed}
+    assert {"wind_list_apis", "wind_get_api_info", "wind_query"} <= rnames
+    assert {"list_apis", "get_api_info", "query", "stock_basic"} <= rnames
+
+
 # ---------------------------------------------------------------------------
 # agentic tool loop：多轮取数（tool_rag → tool_rag 条件自环）
 # ---------------------------------------------------------------------------
@@ -849,6 +1023,58 @@ async def test_agentic_loop_max_iterations_cutoff(make_settings) -> None:
     loop_turns = [d for k, d in events if k == "loop_turn"]
     assert [d["status"] for d in loop_turns] == ["continue", "max-reached"]
     assert [d["round"] for d in loop_turns] == [1, 2]
+
+
+async def test_quick_mode_caps_at_one_tool_round(make_settings) -> None:
+    """mode="quick"：无论 Settings.max_iterations 配多大，只跑一轮取数就强制收尾；
+    system prompt 带上快速模式声明；AgentResult.mode 标记为 quick。"""
+    cfg = make_settings(max_iterations=10)  # 刻意配成很大的上限，验证 quick 模式不受它影响
+    tools = FakeToolProvider(
+        SPECS,
+        {"stock_price_range": ToolResult(content='[{"close":1604.9}]', is_error=False)},
+    )
+    mock = MockLLM(
+        [
+            _router_response('{"intent":"market","out_of_scope":false}'),
+            ChatResponse(stop_reason="end_turn", text="比亚迪 区间"),  # rewrite_query
+            _tool_use_response("c1", "stock_price_range", {"name": "比亚迪"}),  # 唯一一轮
+            ChatResponse(stop_reason="end_turn", text="（快速问答模式）区间价格如下。"),  # synthesizer（无停止判定轮）
+        ]
+    )
+    result = await Agent(llm=mock, tools=tools, config=cfg).run("比亚迪最新价格", mode="quick")
+
+    assert [name for name, _ in tools.calls] == ["stock_price_range"]  # 只查了一次，没有第 2 轮
+    assert len(mock.calls) == 4  # router / rewrite / 唯一一轮 / synthesizer（比多轮模式少一次停止判定）
+    assert result.mode == "quick"
+    assert result.stopped_reason == "end_turn"
+    assert "快速问答模式" in mock.calls[2]["system"]  # tool_rag 选工具轮的 system 带上了快速模式声明
+
+
+async def test_agent_mode_default_unaffected_by_quick_mode_addition(make_settings) -> None:
+    """mode 默认值 "agent"：行为、system prompt 与新增 quick 分支之前完全一致（互不干扰的直接验证）。"""
+    cfg = make_settings(max_iterations=2)
+    tools = FakeToolProvider(
+        SPECS,
+        {
+            "stock_price_range": ToolResult(content='[{"close":1604.9}]', is_error=False),
+            "stock_financials": ToolResult(content='[{"revenue":100}]', is_error=False),
+        },
+    )
+    mock = MockLLM(
+        [
+            _router_response('{"intent":"market","out_of_scope":false}'),
+            ChatResponse(stop_reason="end_turn", text="比亚迪 区间 财务"),  # rewrite_query
+            _tool_use_response("c1", "stock_price_range", {"name": "比亚迪"}),  # 第 1 轮 (continue)
+            _tool_use_response("c2", "stock_financials", {"stock": "比亚迪"}),  # 第 2 轮 (max-reached)
+            ChatResponse(stop_reason="end_turn", text="结果如下。"),  # synthesizer（上限后强制收尾）
+        ]
+    )
+    result = await Agent(llm=mock, tools=tools, config=cfg).run("比亚迪区间与财务")  # 不传 mode → 默认 agent
+
+    assert [name for name, _ in tools.calls] == ["stock_price_range", "stock_financials"]  # 两轮都跑了
+    assert len(mock.calls) == 5
+    assert result.mode == "agent"
+    assert "快速问答模式" not in mock.calls[2]["system"]  # agent 模式的 system 不带快速模式声明
 
 
 async def test_agentic_loop_max_zero_evidence_fallback(make_settings) -> None:

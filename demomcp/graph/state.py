@@ -35,6 +35,7 @@ class GraphState(TypedDict, total=False):
     want_more: bool                  # 上一轮 LLM 是否还要继续取数（tool_uses 非空→True）
     rag_retrieved: bool              # 本次 agent turn 是否已做过一次 RAG 检索（RAG 只跑一次）
     no_progress_count: int           # 连续「未产出新证据/新检索」的工具轮数（进展守卫：达上限即止）
+    direct_answer: str | None        # 停止轮零证据时 LLM 直接作答的文本（启发式通过 → 合成器定稿）
 
     # Synthesizer / Fallback 产出
     final_answer: str | None

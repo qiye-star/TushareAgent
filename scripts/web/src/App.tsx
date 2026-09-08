@@ -2,7 +2,10 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { TooltipProvider, Tooltip } from '@/components/ui/Tooltip'
 import { IconButton } from '@/components/ui/IconButton'
 import { useTheme } from '@/hooks/useTheme'
+import { useQuickReport } from '@/hooks/useQuickReport'
 import { useSessions } from '@/hooks/useSessions'
+import { useMcpStatus } from '@/hooks/useMcpStatus'
+import { useMcpSources } from '@/hooks/useMcpSources'
 import { useChatStore } from '@/state/useChatStore'
 import { getSession, getSessionTurns } from '@/lib/api'
 import { AppShell } from '@/components/layout/AppShell'
@@ -11,12 +14,19 @@ import { TopBar } from '@/components/layout/TopBar'
 import { ConfigPanel } from '@/components/layout/ConfigPanel'
 import { MessageList } from '@/components/chat/MessageList'
 import { Composer } from '@/components/chat/Composer'
+import { QuickReportView } from '@/components/report/QuickReportView'
+import { SettingsView } from '@/components/settings/SettingsView'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { GearSix } from '@phosphor-icons/react'
+
+export type MainView = 'chat' | 'report' | 'settings'
 
 export default function App() {
   const { theme, toggle: toggleTheme } = useTheme()
   const sessions = useSessions()
+  const quickReport = useQuickReport()
+  const mcpStatus = useMcpStatus()
+  const mcpSources = useMcpSources()
 
   const sessionId = useChatStore((s) => s.sessionId)
   const turns = useChatStore((s) => s.turns)
@@ -30,6 +40,7 @@ export default function App() {
   const [activeId, setActiveId] = useState<string | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [configOpen, setConfigOpen] = useState(false)
+  const [view, setView] = useState<MainView>('chat')
   const [pendingAction, setPendingAction] = useState<'reset' | 'clear' | null>(null)
 
   const lastTurn = turns[turns.length - 1]
@@ -127,9 +138,14 @@ export default function App() {
         sidebar={
           <Sidebar
             collapsed={sidebarCollapsed}
+            view={view}
+            onViewChange={setView}
             sessions={sessions.sessions}
             titles={sessions.titles}
             activeId={activeId}
+            histories={quickReport.histories}
+            activeReportDate={quickReport.activeDate}
+            onSelectHistory={(day) => void quickReport.selectHistory(day)}
             onNew={handleNew}
             onSelect={(id) => void handleSelect(id)}
             onDelete={(id) => void handleDelete(id)}
@@ -145,31 +161,84 @@ export default function App() {
           />
         }
         main={
-          <>
-            <TopBar
-              title={title}
-              status={status}
-              theme={theme}
-              onToggleTheme={toggleTheme}
-              onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
-              onReset={() => setPendingAction('reset')}
-              onClearContext={() => setPendingAction('clear')}
-            />
-            <MessageList onRegenerate={(q) => void handleRegenerate(q)} />
-            <Composer onSubmit={(q) => void handleSend(q)} />
-            {/* Mobile config floating toggle */}
-            <div className="fixed bottom-5 right-5 z-20 hidden max-md:block">
-              <Tooltip content="配置">
-                <IconButton
-                  label="配置"
-                  onClick={() => setConfigOpen(true)}
-                  className="h-11 w-11 rounded-full bg-primary-600 text-white shadow-lg hover:bg-primary-500"
-                >
-                  <GearSix size={20} weight="bold" />
-                </IconButton>
-              </Tooltip>
-            </div>
-          </>
+          view === 'report' ? (
+            <>
+              <TopBar
+                title="AI算力产业链 · 高频跟踪快报"
+                status="idle"
+                theme={theme}
+                onToggleTheme={toggleTheme}
+                onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
+                onReset={() => {}}
+                onClearContext={() => {}}
+              />
+              <QuickReportView
+                report={quickReport.report}
+                activeDate={quickReport.activeDate}
+                loading={quickReport.loading}
+                generating={quickReport.generating}
+                error={quickReport.error}
+                onRefresh={() => void quickReport.refresh()}
+                onRegenerate={() => void quickReport.regenerate()}
+                onBackToLatest={() => void quickReport.refresh()}
+              />
+            </>
+          ) : view === 'settings' ? (
+            <>
+              <TopBar
+                title="MCP 数据源设置"
+                status="idle"
+                theme={theme}
+                onToggleTheme={toggleTheme}
+                onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
+                onReset={() => {}}
+                onClearContext={() => {}}
+              />
+              <SettingsView
+                status={mcpStatus.status}
+                loading={mcpStatus.loading}
+                toggling={mcpStatus.toggling}
+                error={mcpStatus.error}
+                onToggle={(v) => void mcpStatus.toggle(v)}
+                onRefresh={() => void mcpStatus.refresh()}
+                sources={mcpSources.sources}
+                gatewayUrl={mcpSources.gatewayUrl}
+                gatewayReachable={mcpSources.reachable}
+                configProblems={mcpSources.configProblems}
+                sourcesLoading={mcpSources.loading}
+                togglingSourceId={mcpSources.togglingId}
+                sourcesError={mcpSources.error}
+                onToggleSource={(id, v) => void mcpSources.toggle(id, v)}
+                onRefreshSources={() => void mcpSources.refresh()}
+              />
+            </>
+          ) : (
+            <>
+              <TopBar
+                title={title}
+                status={status}
+                theme={theme}
+                onToggleTheme={toggleTheme}
+                onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
+                onReset={() => setPendingAction('reset')}
+                onClearContext={() => setPendingAction('clear')}
+              />
+              <MessageList onRegenerate={(q) => void handleRegenerate(q)} />
+              <Composer onSubmit={(q) => void handleSend(q)} />
+              {/* Mobile config floating toggle */}
+              <div className="fixed bottom-5 right-5 z-20 hidden max-md:block">
+                <Tooltip content="配置">
+                  <IconButton
+                    label="配置"
+                    onClick={() => setConfigOpen(true)}
+                    className="h-11 w-11 rounded-full bg-primary-600 text-white shadow-lg hover:bg-primary-500"
+                  >
+                    <GearSix size={20} weight="bold" />
+                  </IconButton>
+                </Tooltip>
+              </div>
+            </>
+          )
         }
       />
 

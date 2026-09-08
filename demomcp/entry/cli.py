@@ -15,7 +15,7 @@ from demomcp.config.logging import configure_logging, get_logger, log_chat_turn
 from demomcp.config.settings import Settings
 from demomcp.db.store import build_store
 from demomcp.providers.llm.deepseek import DeepSeekLLMClient
-from demomcp.providers.tools.wind import agent_tool_provider
+from demomcp.providers.tools.mcp import mcp_tool_provider
 
 logger = get_logger("entry.cli")
 
@@ -40,8 +40,15 @@ async def main() -> int:
         configure_logging(
             settings.log_level, settings.log_file, settings.log_max_bytes, settings.log_backup_count
         )
-        async with agent_tool_provider(settings) as tools:
-            # 直接使用原始 MCP provider：LLM 看到服务端暴露的全部工具（list_apis/get_api_info/query + 各接口工具），可查任意标的任意接口
+        # 取数唯一入口：连独立部署的 MCP 网关（MCP_GATEWAY_URL），本进程不直连任何数据源；
+        # LLM 看到的就是网关按「当前启用的源」动态聚合出来的那批工具。网关没起来 → 这里直接连不上，
+        # 报错退出（CLI 是交互式一次性进程，不做 web 那套后台退避重连）。
+        async with mcp_tool_provider(
+            settings.mcp_gateway_url,
+            timeout=settings.mcp_timeout,
+            retries=settings.mcp_retries,
+            keepalive_interval=settings.mcp_keepalive_interval or None,
+        ) as tools:
             agent = Agent(llm=llm, tools=tools, config=settings)
             session_id = uuid.uuid4().hex
             history: list[dict] = []

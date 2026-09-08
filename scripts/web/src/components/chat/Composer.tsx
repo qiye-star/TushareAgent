@@ -11,6 +11,8 @@ export function Composer({ onSubmit }: { onSubmit: (query: string) => void }) {
   const [fileName, setFileName] = useState<string | null>(null)
   const isStreaming = useChatStore((s) => s.isStreaming)
   const stop = useChatStore((s) => s.stop)
+  const chatMode = useChatStore((s) => s.chatMode)
+  const setChatMode = useChatStore((s) => s.setChatMode)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
@@ -78,6 +80,23 @@ export function Composer({ onSubmit }: { onSubmit: (query: string) => void }) {
                 <Paperclip size={17} />
               </IconButton>
             </Tooltip>
+
+            <div className="flex items-center gap-1 rounded-lg bg-zinc-100 p-0.5 dark:bg-zinc-800">
+              <Button
+                size="sm"
+                variant={chatMode === 'quick' ? 'soft' : 'ghost'}
+                onClick={() => setChatMode('quick')}
+              >
+                快速问答
+              </Button>
+              <Button
+                size="sm"
+                variant={chatMode === 'agent' ? 'soft' : 'ghost'}
+                onClick={() => setChatMode('agent')}
+              >
+                智能体模式
+              </Button>
+            </div>
 
             <div className="ml-auto flex items-center gap-2">
               {isStreaming ? (

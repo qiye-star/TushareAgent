@@ -1,21 +1,67 @@
-# demo-mcp — Web 控制台。
-# 应用经 .env 的 TUSHARE_MCP_URL 连接 Tushare 官方 MCP（token 放 URL query），无需自建 MCP 服务。
-# 内置 mcp_server/（本地代理→每接口工具）默认停用，仅作后备。
+# demo-mcp — 两个独立服务：
+#   demo（8010）        Web 控制台 + agent；**不直连任何数据源**，只作为 MCP 客户端连下面的网关
+#   mcp-gateway（8766） 唯一持有上游 MCP 源（Tushare 官方 MCP / 万得 Wind / 未来更多）的进程，按源开关
+# 两者各自独立容器/端口/重启策略，互不牵连：停掉网关，demo 照常在跑（页面显示「网关不可达」、对话退化
+# 为纯 LLM）；停掉 demo，网关照常对外提供 MCP。故意**不加 depends_on**——demo 自带退避重连，
+# 不把启动顺序再绑回去。
+# 另外那个 mcp-server（8765）是历史遗留的「本地 Tushare 数据代理」后备通道，与网关是不同的东西，
+# 默认不启动（profile 门控）。
 services:
   demo:
     build: .
     ports:
       - "8010:8010"
     env_file:
-      - .env            # DS_API_KEY / DS_MODEL / TUSHARE_MCP_URL（含 token）等
+      - .env            # DS_API_KEY / DS_MODEL 等（上游源的 token/key 在 mcp_gateway/.env，不在这里）
     environment:
       # 会话历史用 SQLite，且放进 volume 便于持久化
       DEMO_DATABASE_URL: sqlite+aiosqlite:////app/data/demo.db
+      # 取数唯一入口：compose 网络里按 service 名访问网关
+      MCP_GATEWAY_URL: http://mcp-gateway:8766/mcp
     volumes:
-      - demo_data:/app/data                      # 会话 demo.db（保留）
+      - demo_data:/app/data                      # 会话 demo.db（保留；同目录下 settings/mcp_toggle.json 随之持久化）
       - ./data/vectorstore:/app/data/vectorstore  # 共享本地已建好的 RAG 索引（has_index→load_index 快载，不重灌）
       - ./docs:/app/docs                          # 语料（RAG_CORPUS_DIR=docs 可解析；索引未命中时也可 ingest）
     restart: unless-stopped
 
+  # 内置本地 Tushare 数据代理 MCP（mcp_server/server.py）：独立服务，默认不随 `docker compose up` 启动
+  # （用 `docker compose up -d mcp-server` 显式拉起）。它自己经 TUSHARE_PROXY_URL 连的「数据代理」不在本仓库内，
+  # 需指向宿主机/其它可达服务（如 Docker Desktop 用 http://host.docker.internal:8000）。
+  # 若要让 demo 改用它取数而非官方 MCP：把 demo 的 TUSHARE_MCP_URL 改成 http://mcp-server:8765/mcp
+  # （两个 service 共享 compose 默认网络，可用 service 名互相访问）。
+  mcp-server:
+    build: .
+    command: ["uv", "run", "python", "mcp_server/server.py"]
+    ports:
+      - "8765:8765"
+    env_file:
+      - .env
+    environment:
+      MCP_SERVER_HOST: 0.0.0.0
+      MCP_SERVER_PORT: "8765"
+      # TUSHARE_PROXY_URL: http://host.docker.internal:8000
+      # TUSHARE_API_KEY:
+    restart: unless-stopped
+    profiles:
+      - mcp-server   # 默认不随 `docker compose up` 启动（与 demo 主服务解耦）；
+                     # 显式 `docker compose --profile mcp-server up -d` 拉起，
+                     # `docker compose --profile mcp-server stop mcp-server` 随时单独停用，不影响 demo。
+
+  # MCP 网关（mcp_gateway/）：唯一持有上游 MCP 源的进程——按源（Tushare / 万得 / 未来更多）聚合 + 开关，
+  # 对外说真正的 MCP 协议（/mcp）+ 一个管理 REST（/admin/*）。**默认随 `docker compose up` 启动**，
+  # 但是**独立容器**：`docker compose stop mcp-gateway` 只停它，demo 不受影响（这就是解耦的可观察形态）。
+  # 配置只在 mcp_gateway/.env（从项目根 .env 搬 TUSHARE_MCP_URL 与 WIND_API_KEY 两行过来）。
+  mcp-gateway:
+    build: .
+    command: ["uv", "run", "uvicorn", "mcp_gateway.app:app", "--host", "0.0.0.0", "--port", "8766"]
+    ports:
+      - "8766:8766"
+    env_file:
+      - mcp_gateway/.env   # 必需文件：见 mcp_gateway/.env.example（缺了 compose 会直接报 env file not found）
+    volumes:
+      - mcp_gateway_data:/app/mcp_gateway/data   # 按源开关持久化（sources.json），容器重建后保留
+    restart: unless-stopped
+
 volumes:
   demo_data:
+  mcp_gateway_data:

@@ -1,4 +1,6 @@
 import type { SessionMessage, SessionMeta, TurnBlob } from './types'
+import { parseQuickReport, type QuickReport } from './quickReport'
+import type { McpSource, McpSourcesResponse, McpStatus } from './mcp'
 
 const jsonHeaders = { 'Content-Type': 'application/json' }
 
@@ -30,6 +32,56 @@ export async function deleteSession(sessionId: string): Promise<void> {
   if (!res.ok) throw new Error(`删除会话失败 (${res.status})`)
 }
 
+/** 读最近一份快报；尚未生成（404）→ null；形状不符 → null（绝不让解析错误崩页面）。 */
+export async function getQuickReport(): Promise<QuickReport | null> {
+  const res = await fetch('/api/quickreport/latest')
+  if (res.status === 404) return null
+  if (!res.ok) throw new Error(`无法获取快报 (${res.status})`)
+  return parseQuickReport(await res.json())
+}
+
+/** 手动触发生成（date 可选 YYYYMMDD 覆盖报告日）；409 进行中 → 抛错。 */
+export async function generateQuickReport(date?: string | null): Promise<QuickReport | null> {
+  const res = await fetch('/api/quickreport/generate', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({ date: date ?? null }),
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    let detail = text
+    try {
+      detail = JSON.parse(text).detail ?? text
+    } catch {
+      /* keep raw */
+    }
+    throw new Error(typeof detail === 'string' ? detail : `快报生成失败 (${res.status})`)
+  }
+  return parseQuickReport(await res.json())
+}
+
+/** 历史快报摘要列表（日期降序）：{date, generated_at, missing, status_ok}。 */
+export async function listQuickReportHistory(): Promise<QuickReportHistoryItem[]> {
+  const res = await fetch('/api/quickreport/history')
+  if (!res.ok) throw new Error(`无法获取快报历史 (${res.status})`)
+  return res.json()
+}
+
+/** 按日读取存档快报（day = YYYY-MM-DD）；无存档 → null。 */
+export async function getQuickReportByDate(day: string): Promise<QuickReport | null> {
+  const res = await fetch(`/api/quickreport/report/${encodeURIComponent(day)}`)
+  if (res.status === 404) return null
+  if (!res.ok) throw new Error(`无法获取快报 (${res.status})`)
+  return parseQuickReport(await res.json())
+}
+
+export interface QuickReportHistoryItem {
+  date: string
+  generated_at: string | null
+  missing: string[]
+  status_ok: boolean
+}
+
 export async function copyText(text: string): Promise<void> {
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(text)
@@ -43,6 +95,42 @@ export async function copyText(text: string): Promise<void> {
     document.execCommand('copy')
     document.body.removeChild(ta)
   }
+}
+
+/** 读 MCP 全局运行时开关状态（启用/停用、是否已连接、工具数）。 */
+export async function getMcpStatus(): Promise<McpStatus> {
+  const res = await fetch('/api/settings/mcp')
+  if (!res.ok) throw new Error(`无法获取 MCP 状态 (${res.status})`)
+  return res.json()
+}
+
+/** 切换 MCP 全局开关（影响所有会话，立即生效，无需重启后端）。 */
+export async function setMcpEnabled(enabled: boolean): Promise<McpStatus> {
+  const res = await fetch('/api/settings/mcp', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({ enabled }),
+  })
+  if (!res.ok) throw new Error(`切换 MCP 开关失败 (${res.status})`)
+  return res.json()
+}
+
+/** 按源状态（网关模式）：未配置 MCP_GATEWAY_URL 时 gateway_configured=false、sources=[]（不是错误）。 */
+export async function getMcpSources(): Promise<McpSourcesResponse> {
+  const res = await fetch('/api/settings/mcp/sources')
+  if (!res.ok) throw new Error(`无法获取数据源列表 (${res.status})`)
+  return res.json()
+}
+
+/** 切换单个数据源（仅网关模式下有效；未配置网关时后端返回 400）。 */
+export async function setMcpSourceEnabled(id: string, enabled: boolean): Promise<McpSource> {
+  const res = await fetch(`/api/settings/mcp/sources/${encodeURIComponent(id)}`, {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({ enabled }),
+  })
+  if (!res.ok) throw new Error(`切换数据源失败 (${res.status})`)
+  return res.json()
 }
 
 export { jsonHeaders }

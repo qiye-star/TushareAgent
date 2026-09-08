@@ -1,0 +1,1299 @@
+{
+  "version": 1,
+  "name": "AI算力产业链",
+  "watchlist": [
+    {
+      "name": "深科技",
+      "ts_code": "000021.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "神州数码",
+      "ts_code": "000034.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "高新发展",
+      "ts_code": "000628.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "智度股份",
+      "ts_code": "000676.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "视觉中国",
+      "ts_code": "000681.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "紫光股份",
+      "ts_code": "000938.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "浪潮信息",
+      "ts_code": "000977.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "华工科技",
+      "ts_code": "000988.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "德明利",
+      "ts_code": "001309.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "亿道信息",
+      "ts_code": "001314.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "紫光国微",
+      "ts_code": "002049.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "三花智控",
+      "ts_code": "002050.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "利欧股份",
+      "ts_code": "002131.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "通富微电",
+      "ts_code": "002156.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "华天科技",
+      "ts_code": "002185.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "天融信",
+      "ts_code": "002212.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "科大讯飞",
+      "ts_code": "002230.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "歌尔股份",
+      "ts_code": "002241.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "拓维信息",
+      "ts_code": "002261.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "水晶光电",
+      "ts_code": "002273.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "光迅科技",
+      "ts_code": "002281.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "科华数据",
+      "ts_code": "002335.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "漫步者",
+      "ts_code": "002351.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "北方华创",
+      "ts_code": "002371.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "四维图新",
+      "ts_code": "002405.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "雅克科技",
+      "ts_code": "002409.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "兴森科技",
+      "ts_code": "002436.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "启明星辰",
+      "ts_code": "002439.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "沪电股份",
+      "ts_code": "002463.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "双环传动",
+      "ts_code": "002472.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "立讯精密",
+      "ts_code": "002475.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "埃斯顿",
+      "ts_code": "002747.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "久远银海",
+      "ts_code": "002777.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "英维克",
+      "ts_code": "002837.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "视源股份",
+      "ts_code": "002841.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "麦格米特",
+      "ts_code": "002851.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "中大力德",
+      "ts_code": "002896.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "意华股份",
+      "ts_code": "002897.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "华阳集团",
+      "ts_code": "002906.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "深南电路",
+      "ts_code": "002916.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "德赛西威",
+      "ts_code": "002920.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "雷赛智能",
+      "ts_code": "002979.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "兆威机电",
+      "ts_code": "003021.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "网宿科技",
+      "ts_code": "300017.SZ",
+      "source": "template",
+      "remark": "CDN/IDC"
+    },
+    {
+      "name": "同花顺",
+      "ts_code": "300033.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "鼎龙股份",
+      "ts_code": "300054.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "蓝色光标",
+      "ts_code": "300058.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "东方财富",
+      "ts_code": "300059.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "汇川技术",
+      "ts_code": "300124.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "汉得信息",
+      "ts_code": "300170.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "国投智能",
+      "ts_code": "300188.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "*ST易录",
+      "ts_code": "300212.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "君正股份",
+      "ts_code": "300223.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "上海钢联",
+      "ts_code": "300226.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "拓尔思",
+      "ts_code": "300229.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "卫宁健康",
+      "ts_code": "300253.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "中际旭创",
+      "ts_code": "300308.SZ",
+      "source": "template",
+      "remark": "光模块龙头"
+    },
+    {
+      "name": "润和软件",
+      "ts_code": "300339.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "南大光电",
+      "ts_code": "300346.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "长亮科技",
+      "ts_code": "300348.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "中文在线",
+      "ts_code": "300364.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "绿盟科技",
+      "ts_code": "300369.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "赢时胜",
+      "ts_code": "300377.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "鼎捷数智",
+      "ts_code": "300378.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "光环新网",
+      "ts_code": "300383.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "天孚通信",
+      "ts_code": "300394.SZ",
+      "source": "template",
+      "remark": "光器件"
+    },
+    {
+      "name": "昆仑万维",
+      "ts_code": "300418.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "润泽科技",
+      "ts_code": "300442.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "创业慧康",
+      "ts_code": "300451.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "深信服",
+      "ts_code": "300454.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "景嘉微",
+      "ts_code": "300474.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "香农芯创",
+      "ts_code": "300475.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "中科创达",
+      "ts_code": "300496.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "新易盛",
+      "ts_code": "300502.SZ",
+      "source": "template",
+      "remark": "800G/1.6T 光模块主力"
+    },
+    {
+      "name": "万集科技",
+      "ts_code": "300552.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "佳发教育",
+      "ts_code": "300559.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "精测电子",
+      "ts_code": "300567.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "太辰光",
+      "ts_code": "300570.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "贝斯特",
+      "ts_code": "300580.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "诚迈科技",
+      "ts_code": "300598.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "长川科技",
+      "ts_code": "300604.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "博士眼镜",
+      "ts_code": "300622.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "万兴科技",
+      "ts_code": "300624.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "世纪天鸿",
+      "ts_code": "300654.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "江苏雷利",
+      "ts_code": "300660.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "江丰电子",
+      "ts_code": "300666.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "宇信科技",
+      "ts_code": "300674.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "电连技术",
+      "ts_code": "300679.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "赛意信息",
+      "ts_code": "300687.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "药石科技",
+      "ts_code": "300725.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "奥飞数据",
+      "ts_code": "300738.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "每日互动",
+      "ts_code": "300766.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "矩子科技",
+      "ts_code": "300802.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "指南针",
+      "ts_code": "300803.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "首都在线",
+      "ts_code": "300846.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "安克创新",
+      "ts_code": "300866.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "欧陆通",
+      "ts_code": "300870.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "申菱环境",
+      "ts_code": "301018.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "广立微",
+      "ts_code": "301095.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "锐捷网络",
+      "ts_code": "301165.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "零点有数",
+      "ts_code": "301169.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "光庭信息",
+      "ts_code": "301221.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "泓博医药",
+      "ts_code": "301230.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "软通动力",
+      "ts_code": "301236.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "华大九天",
+      "ts_code": "301269.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "江波龙",
+      "ts_code": "301308.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "丰立智能",
+      "ts_code": "301368.SZ",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "生益科技",
+      "ts_code": "600183.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "旭光电子",
+      "ts_code": "600353.SH",
+      "source": "template",
+      "remark": "电子陶瓷"
+    },
+    {
+      "name": "金证股份",
+      "ts_code": "600446.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "亨通光电",
+      "ts_code": "600487.SH",
+      "source": "template",
+      "remark": "光纤光缆/海缆"
+    },
+    {
+      "name": "天下秀",
+      "ts_code": "600556.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "恒生电子",
+      "ts_code": "600570.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "长电科技",
+      "ts_code": "600584.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "用友网络",
+      "ts_code": "600588.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "云赛智联",
+      "ts_code": "600602.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "先导基电",
+      "ts_code": "600641.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "均胜电子",
+      "ts_code": "600699.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "*ST闻泰",
+      "ts_code": "600745.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "宝信软件",
+      "ts_code": "600845.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "中国移动",
+      "ts_code": "600941.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "恒立液压",
+      "ts_code": "601100.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "工业富联",
+      "ts_code": "601138.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "三六零",
+      "ts_code": "601360.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "拓普集团",
+      "ts_code": "601689.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "中国电信",
+      "ts_code": "601728.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "人民网",
+      "ts_code": "603000.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "晶方科技",
+      "ts_code": "603005.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "北特科技",
+      "ts_code": "603009.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "中科曙光",
+      "ts_code": "603019.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "泛微网络",
+      "ts_code": "603039.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "剑桥科技",
+      "ts_code": "603083.SH",
+      "source": "template",
+      "remark": "光模块"
+    },
+    {
+      "name": "海量数据",
+      "ts_code": "603138.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "华勤技术",
+      "ts_code": "603296.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "顶点软件",
+      "ts_code": "603383.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "恒为科技",
+      "ts_code": "603496.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "柯力传感",
+      "ts_code": "603662.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "五洲新春",
+      "ts_code": "603667.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "鸣志电器",
+      "ts_code": "603728.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "能科科技",
+      "ts_code": "603859.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "数据港",
+      "ts_code": "603881.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "金域医学",
+      "ts_code": "603882.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "兆易创新",
+      "ts_code": "603986.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "立昂微",
+      "ts_code": "605358.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "天准科技",
+      "ts_code": "688003.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "澜起科技",
+      "ts_code": "688008.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "中微公司",
+      "ts_code": "688012.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "绿的谐波",
+      "ts_code": "688017.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "安集科技",
+      "ts_code": "688019.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "安恒信息",
+      "ts_code": "688023.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "星环科技-U",
+      "ts_code": "688031.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "传音控股",
+      "ts_code": "688036.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "芯源微",
+      "ts_code": "688037.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "当虹科技",
+      "ts_code": "688039.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "海光信息",
+      "ts_code": "688041.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "龙芯中科",
+      "ts_code": "688047.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "炬芯科技",
+      "ts_code": "688049.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "拓荆科技",
+      "ts_code": "688072.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "盛美上海",
+      "ts_code": "688082.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "中望软件",
+      "ts_code": "688083.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "虹软科技",
+      "ts_code": "688088.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "福昕软件",
+      "ts_code": "688095.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "安路科技",
+      "ts_code": "688107.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "东芯股份",
+      "ts_code": "688110.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "金山办公",
+      "ts_code": "688111.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "华海清科",
+      "ts_code": "688120.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "聚辰股份",
+      "ts_code": "688123.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "沪硅产业",
+      "ts_code": "688126.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "中船特气",
+      "ts_code": "688146.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "优刻得-W",
+      "ts_code": "688158.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "步科股份",
+      "ts_code": "688160.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "华峰测控",
+      "ts_code": "688200.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "概伦电子",
+      "ts_code": "688206.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "格灵深瞳",
+      "ts_code": "688207.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "成都先导",
+      "ts_code": "688222.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "永信至诚",
+      "ts_code": "688244.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "晶合集成",
+      "ts_code": "688249.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "寒武纪",
+      "ts_code": "688256.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "华特气体",
+      "ts_code": "688268.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "联影医疗",
+      "ts_code": "688271.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "仕佳光子",
+      "ts_code": "688313.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "青云科技-U",
+      "ts_code": "688316.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "财富趋势",
+      "ts_code": "688318.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "禾川科技",
+      "ts_code": "688320.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "奥比中光-W",
+      "ts_code": "688322.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "经纬恒润-W",
+      "ts_code": "688326.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "云从科技-UW",
+      "ts_code": "688327.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "中科蓝讯",
+      "ts_code": "688332.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "云天励飞-U",
+      "ts_code": "688343.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "华虹宏力",
+      "ts_code": "688347.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "中科飞测",
+      "ts_code": "688361.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "甬矽电子",
+      "ts_code": "688362.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "致远互联",
+      "ts_code": "688369.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "复旦微电",
+      "ts_code": "688385.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "凌云光",
+      "ts_code": "688400.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "芯联集成-U",
+      "ts_code": "688469.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "源杰科技",
+      "ts_code": "688498.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "芯原股份",
+      "ts_code": "688521.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "佰维存储",
+      "ts_code": "688525.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "奇安信-U",
+      "ts_code": "688561.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "恒玄科技",
+      "ts_code": "688608.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "华丰科技",
+      "ts_code": "688629.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "鼎通科技",
+      "ts_code": "688668.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "奥普特",
+      "ts_code": "688686.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "达梦数据",
+      "ts_code": "688692.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "盛科通信-U",
+      "ts_code": "688702.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "普冉股份",
+      "ts_code": "688766.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "中控技术",
+      "ts_code": "688777.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "海天瑞声",
+      "ts_code": "688787.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "中芯国际",
+      "ts_code": "688981.SH",
+      "source": "csv",
+      "remark": ""
+    },
+    {
+      "name": "鼎智科技",
+      "ts_code": "920593.BJ",
+      "source": "csv",
+      "remark": ""
+    }
+  ],
+  "board": {
+    "th_concepts": [],
+    "sw_indexes": [],
+    "indexes": [
+      "上证指数",
+      "沪深300",
+      "中证500",
+      "创业板指",
+      "上证50",
+      "科创50"
+    ],
+    "dc_flow": false
+  },
+  "thresholds": {
+    "up": 50.0,
+    "down": -20.0
+  },
+  "schedule": {
+    "hour": 8,
+    "minute": 30,
+    "tz": "Asia/Shanghai"
+  },
+  "news_sources": [
+    "wallstreetcn",
+    "sina"
+  ],
+  "display_limit": 100
+}

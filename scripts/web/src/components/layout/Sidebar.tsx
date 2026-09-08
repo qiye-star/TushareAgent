@@ -1,8 +1,10 @@
 import { useState } from 'react'
 import {
+  ChartLineUp,
   ChatText,
   DotsThree,
   PencilSimple,
+  Plugs,
   Plus,
   SidebarSimple,
   Trash,
@@ -10,15 +12,22 @@ import {
 import { formatTime } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import type { SessionMeta } from '@/lib/types'
+import type { MainView } from '@/App'
+import type { QuickReportHistoryItem } from '@/lib/api'
 import { Button } from '@/components/ui/Button'
 import { DropdownMenu, MenuItem } from '@/components/ui/DropdownMenu'
 import { Dialog } from '@/components/ui/Dialog'
 
 type Props = {
   collapsed: boolean
+  view: MainView
+  onViewChange: (v: MainView) => void
   sessions: SessionMeta[]
   titles: Record<string, string>
   activeId: string | null
+  histories: QuickReportHistoryItem[]
+  activeReportDate: string | null
+  onSelectHistory: (day: string) => void
   onNew: () => void
   onSelect: (id: string) => void
   onDelete: (id: string) => void
@@ -28,9 +37,14 @@ type Props = {
 
 export function Sidebar({
   collapsed,
+  view,
+  onViewChange,
   sessions,
   titles,
   activeId,
+  histories,
+  activeReportDate,
+  onSelectHistory,
   onNew,
   onSelect,
   onDelete,
@@ -58,6 +72,41 @@ export function Sidebar({
         >
           <Plus size={18} weight="bold" />
         </button>
+        <div className="mt-2 flex w-full flex-col items-center gap-1 px-2">
+          <button
+            type="button"
+            title="聊天"
+            onClick={() => onViewChange('chat')}
+            className={cn(
+              'flex h-9 w-full items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800',
+              view === 'chat' && 'bg-primary-50 text-primary-600 dark:bg-primary-500/10 dark:text-primary-300',
+            )}
+          >
+            <ChatText size={17} />
+          </button>
+          <button
+            type="button"
+            title="快报"
+            onClick={() => onViewChange('report')}
+            className={cn(
+              'flex h-9 w-full items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800',
+              view === 'report' && 'bg-primary-50 text-primary-600 dark:bg-primary-500/10 dark:text-primary-300',
+            )}
+          >
+            <ChartLineUp size={17} />
+          </button>
+          <button
+            type="button"
+            title="设置"
+            onClick={() => onViewChange('settings')}
+            className={cn(
+              'flex h-9 w-full items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800',
+              view === 'settings' && 'bg-primary-50 text-primary-600 dark:bg-primary-500/10 dark:text-primary-300',
+            )}
+          >
+            <Plugs size={17} />
+          </button>
+        </div>
         <div className="mt-4 w-full space-y-1 px-2">
           {sessions.slice(0, 6).map((s) => (
             <button
@@ -101,13 +150,114 @@ export function Sidebar({
         </Button>
       </div>
 
-      <div className="flex items-center justify-between px-4 pb-1 pt-3">
-        <span className="text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-400 dark:text-zinc-500">
-          会话
-        </span>
-      </div>
+      {/* 聊天 / 快报 板块切换：上下排版（上方导航，下方跟随对应记录列表） */}
+      <nav className="flex flex-col gap-0.5 px-2 pt-2.5">
+        <button
+          type="button"
+          onClick={() => onViewChange('chat')}
+          className={cn(
+            'flex items-center gap-2.5 rounded-lg px-3 py-2 text-[13.5px] font-medium transition-colors',
+            view === 'chat'
+              ? 'bg-primary-50 text-primary-700 dark:bg-primary-500/10 dark:text-primary-300'
+              : 'text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800',
+          )}
+        >
+          <ChatText size={17} className={cn(view === 'chat' && 'text-primary-600 dark:text-primary-400')} />
+          聊天
+        </button>
+        <button
+          type="button"
+          onClick={() => onViewChange('report')}
+          className={cn(
+            'flex items-center gap-2.5 rounded-lg px-3 py-2 text-[13.5px] font-medium transition-colors',
+            view === 'report'
+              ? 'bg-primary-50 text-primary-700 dark:bg-primary-500/10 dark:text-primary-300'
+              : 'text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800',
+          )}
+        >
+          <ChartLineUp size={17} className={cn(view === 'report' && 'text-primary-600 dark:text-primary-400')} />
+          快报
+        </button>
+        <button
+          type="button"
+          onClick={() => onViewChange('settings')}
+          className={cn(
+            'flex items-center gap-2.5 rounded-lg px-3 py-2 text-[13.5px] font-medium transition-colors',
+            view === 'settings'
+              ? 'bg-primary-50 text-primary-700 dark:bg-primary-500/10 dark:text-primary-300'
+              : 'text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800',
+          )}
+        >
+          <Plugs size={17} className={cn(view === 'settings' && 'text-primary-600 dark:text-primary-400')} />
+          设置
+        </button>
+      </nav>
 
-      <nav className="flex-1 space-y-0.5 overflow-y-auto px-2 pb-2">
+      {view === 'settings' ? (
+        <div className="flex-1" />
+      ) : view === 'report' ? (
+        <>
+          <div className="flex items-center justify-between px-4 pb-1 pt-3">
+            <span className="text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-400 dark:text-zinc-500">
+              历史快报
+            </span>
+          </div>
+          <nav className="flex-1 space-y-0.5 overflow-y-auto px-2 pb-2">
+            {histories.length === 0 && (
+              <div className="px-2 py-6 text-center text-[12.5px] text-zinc-400 dark:text-zinc-500">
+                暂无历史快报
+              </div>
+            )}
+            {histories.map((h) => {
+              const active = h.date === activeReportDate || (activeReportDate == null && h.date === 'latest')
+              return (
+                <button
+                  key={h.date}
+                  type="button"
+                  onClick={() => onSelectHistory(h.date)}
+                  className={cn(
+                    'flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors',
+                    active
+                      ? 'bg-primary-50 dark:bg-primary-500/10'
+                      : 'hover:bg-zinc-100 dark:hover:bg-zinc-800',
+                  )}
+                >
+                  <ChartLineUp
+                    size={15}
+                    className={cn(
+                      'shrink-0 text-zinc-400 dark:text-zinc-500',
+                      active && 'text-primary-600 dark:text-primary-400',
+                    )}
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span
+                      className={cn(
+                        'block truncate text-[13.5px] font-medium',
+                        active ? 'text-primary-700 dark:text-primary-300' : 'text-zinc-700 dark:text-zinc-200',
+                      )}
+                    >
+                      {h.date}
+                    </span>
+                  </span>
+                  {!h.status_ok && (
+                    <span className="shrink-0 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-500/20 dark:text-amber-300">
+                      缺段
+                    </span>
+                  )}
+                </button>
+              )
+            })}
+          </nav>
+        </>
+      ) : (
+        <>
+          <div className="flex items-center justify-between px-4 pb-1 pt-3">
+            <span className="text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-400 dark:text-zinc-500">
+              会话
+            </span>
+          </div>
+
+          <nav className="flex-1 space-y-0.5 overflow-y-auto px-2 pb-2">
         {sessions.length === 0 && (
           <div className="px-2 py-6 text-center text-[12.5px] text-zinc-400 dark:text-zinc-500">
             暂无会话
@@ -177,7 +327,9 @@ export function Sidebar({
             </div>
           )
         })}
-      </nav>
+          </nav>
+        </>
+      )}
 
       <div className="border-t border-zinc-200 px-3 py-2.5 dark:border-zinc-800">
         <button

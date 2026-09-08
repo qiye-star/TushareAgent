@@ -61,3 +61,56 @@ async def test_mock_llm_pops_and_records() -> None:
     out = await mock.chat(messages=[{"role": "user", "content": "q"}], tools=[])
     assert out.text == "hi"
     assert len(mock.calls) == 1
+
+
+class _FakeMessage:
+    def __init__(self, content: str | None = "ok") -> None:
+        self.content = content
+        self.tool_calls = None
+
+
+class _FakeChoice:
+    def __init__(self) -> None:
+        self.message = _FakeMessage()
+        self.finish_reason = "stop"
+
+
+class _FakeCompletion:
+    def __init__(self) -> None:
+        self.choices = [_FakeChoice()]
+        self.usage = None
+
+
+async def test_chat_omits_tool_choice_when_tools_empty(monkeypatch) -> None:
+    """tools=[] 时不应发 tool_choice——OpenAI 兼容 API 在没有 tools 却收到 tool_choice 时会报错
+
+    （2026-09-07 事故：MCP 全局开关关闭后 NullToolProvider 让 tools=[] 首次可达，之前从未触发过）。
+    """
+    client = DeepSeekLLMClient(api_key="x", base_url="http://gw", model="m")
+    captured: dict = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _FakeCompletion()
+
+    monkeypatch.setattr(client._client.chat.completions, "create", fake_create)
+    await client.chat(messages=[{"role": "user", "content": "hi"}], tools=[], stream=False)
+
+    assert "tools" not in captured
+    assert "tool_choice" not in captured
+
+
+async def test_chat_includes_tool_choice_when_tools_present(monkeypatch) -> None:
+    client = DeepSeekLLMClient(api_key="x", base_url="http://gw", model="m")
+    captured: dict = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _FakeCompletion()
+
+    monkeypatch.setattr(client._client.chat.completions, "create", fake_create)
+    spec = ToolSpec(name="query", description="d", input_schema={"type": "object", "properties": {}})
+    await client.chat(messages=[{"role": "user", "content": "hi"}], tools=[spec], stream=False)
+
+    assert captured["tool_choice"] == "auto"
+    assert captured["tools"][0]["function"]["name"] == "query"
