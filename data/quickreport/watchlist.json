@@ -1295,5 +1295,24 @@
     "wallstreetcn",
     "sina"
   ],
+  "news_keywords": [
+    "算力",
+    "光模块",
+    "CPO",
+    "光通信",
+    "AI算力",
+    "AI服务器",
+    "人工智能",
+    "英伟达",
+    "GPU",
+    "PCB",
+    "液冷",
+    "数据中心",
+    "交换机",
+    "光芯片",
+    "HBM",
+    "先进封装"
+  ],
+  "news_stock_codes": [],
   "display_limit": 100
 }

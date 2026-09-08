@@ -97,6 +97,14 @@ class WatchlistConfig:
     thresholds: Thresholds = field(default_factory=Thresholds)
     schedule: Schedule = field(default_factory=Schedule)
     news_sources: tuple[str, ...] = ("wallstreetcn", "sina")
+    # 产业链相关性关键词：免费源的 get_market_headlines 是**全市场**头条
+    # （实测同一批里混着「《全国渔业发展十五五规划》印发」这种与算力无关的条目），
+    # 不过滤就会让算力快报里出现渔业规划。空 = 不过滤（取最新若干条）。
+    news_keywords: tuple[str, ...] = ()
+    # 可选：额外按标的拉个股新闻的 6 位裸代码（免费源要裸码，不带 .SZ/.SH）。
+    # 刻意做成配置而非「当日涨幅前 N 名」——news 段与 watchlist 段在同一个 gather 里并行，
+    # 依赖后者的结果就得串行化；且调用次数必须有界（211 只逐个调不可接受）。
+    news_stock_codes: tuple[str, ...] = ()
     display_limit: int = 100
 
     # —— 便捷访问（pipeline 用）——
@@ -160,6 +168,9 @@ class WatchlistConfig:
                     tz=str(sch_raw.get("tz", "Asia/Shanghai")),
                 ),
                 news_sources=tuple(str(x) for x in data.get("news_sources", []) if x) or ("wallstreetcn", "sina"),
+                news_keywords=tuple(str(x) for x in data.get("news_keywords", []) if x),
+                # 硬上限 5 只：每只一次远端调用，配置写多了会把 news 段拖过段级超时
+                news_stock_codes=tuple(str(x) for x in data.get("news_stock_codes", []) if x)[:5],
                 display_limit=int(data.get("display_limit", 100)),
             )
         except (TypeError, ValueError) as exc:  # 字段类型不对（如 thresholds.up 是字符串）

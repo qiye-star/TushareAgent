@@ -27,6 +27,7 @@ from typing import Any
 from demomcp.graph.tracker_render import _extract_rows, _get
 from demomcp.interfaces.tool_provider import ToolProvider
 from demomcp.quickreport.config import ConfigError, WatchlistConfig, cn_tz
+from demomcp.quickreport.predicate import news_meta_of, news_title_of, news_url_of
 from demomcp.quickreport.projection import (
     build_brief,
     flow_to_yi,
@@ -41,7 +42,9 @@ from demomcp.quickreport.source import (
     KIND_IFIND,
     KIND_PIPELINE,
     KIND_TUSHARE,
+    KIND_WIND,
     source_kind,
+    source_label,
 )
 
 _PERMISSION_WORDS = ("积分", "权限", "无权限", "提升", "需提高", "需提升", "points")
@@ -504,34 +507,242 @@ def _tag_ann(row: dict[str, Any], ann_type: str) -> None:
     )
 
 
-async def _fetch_news(tools: ToolProvider, ctx: _Ctx, cfg: WatchlistConfig, day: str) -> tuple[list[dict[str, Any]], bool]:
+async def _fetch_news(
+    tools: ToolProvider, ctx: _Ctx, cfg: WatchlistConfig, day: str
+) -> tuple[list[dict[str, Any]], bool, dict[str, Any]]:
+    """产业链催化事件：四级降级链。返回 (rows, chain_ok, prov)。
+
+    **顺序由 2026-09-08 实测确定，与改造前正好相反**：
+      ① 免费源 china_news（get_market_headlines / 可选 get_stock_news）
+         —— 免费、无配额，且东财的**新闻域**不在行情 CDN 的 IP 封锁范围内（实测始终可用）
+      ② iFind search_news —— 结构化记录，受套餐并发限制（最多用 1 次调用）
+      ③ Wind get_financial_news —— 实测当日报「单日请求次数超限」（有日配额，不是没权限）
+      ④ Tushare news(src=…) —— 实测两个 src 全 40203 无权限
+
+    改造前的顺序是 ④→③：每轮先烧两次必失败的 Tushare 调用，再撞上 Wind 日配额，才落到 na。
+    倒转顺序既是正确性修复也是延迟修复。
+
+    三态语义不变：reachable 跨层累积 → 有行=ok / 可达但无行=empty / 全层不可达=na。
+    每层命中即短路返回（第一手拿到就不再打后面的付费源）。
+    """
     d = _parse_ymd(day)
-    start = f"{d.isoformat()} 00:00:00"
-    end = f"{d.isoformat()} 23:59:59"
+    prov: dict[str, Any] = {"src": None, "src_tool": None, "attempts": [], "note": None}
     reachable = False
-    for src in cfg.news_sources:
-        content = await _call(tools, ctx, "news", {"src": src, "start_date": start, "end_date": end}, stage="news")
-        if content is None:  # 该源不可达（权限/异常）→ 换下一个 src
-            continue
+
+    def _attempt(kind: str, tool: str, *, ok: bool, reason: str | None = None) -> None:
+        prov["attempts"].append(
+            {"source": kind, "tool": tool, "ok": ok, **({"reason": reason} if reason else {})}
+        )
+
+    def _win(kind: str, tool: str, note: str | None = None) -> None:
+        prov["src"], prov["src_tool"] = kind, tool
+        if note:
+            prov["note"] = note
+        _attempt(kind, tool, ok=True)
+
+    # —— ① 免费源：市场头条（+ 可选个股新闻）——
+    content = await _call(tools, ctx, "get_market_headlines", {"top_n": 50}, stage="news")
+    if content is not None:
         reachable = True
-        rows = _extract_rows(content)
+        rows, filtered = _unpack_free_headlines(content, cfg.news_keywords)
+        extra: list[dict[str, Any]] = []
+        for code in cfg.news_stock_codes:
+            c = await _call(tools, ctx, "get_stock_news", {"ticker": code}, stage="news")
+            if c is None:
+                _attempt(KIND_FREE, "get_stock_news", ok=False, reason="取数失败")
+                continue
+            _attempt(KIND_FREE, "get_stock_news", ok=True)
+            extra.extend(_unpack_free_stock_news(c))
+        merged = _dedup_news(rows + extra)
+        if _is_usable(merged):
+            note = None if (filtered or not cfg.news_keywords) else "无产业链关键词命中，展示市场头条"
+            _win(KIND_FREE, "get_market_headlines", note)
+            return merged, True, prov
+        _attempt(KIND_FREE, "get_market_headlines", ok=True, reason="可达但本期无可用条目")
+    else:
+        _attempt(KIND_FREE, "get_market_headlines", ok=False, reason="取数失败")
+
+    # —— ② iFind search_news（最多 1 次调用，不触碰 IFIND_CONCURRENCY=2）——
+    content = await _call(
+        tools, ctx, "ifind_query",
+        {"api_name": "search_news",
+         "params": {"query": _news_query(cfg),
+                    "time_start": (d - timedelta(days=2)).isoformat(),
+                    "time_end": d.isoformat(),
+                    "size": 20}},
+        stage="news",
+    )
+    if content is not None:
+        reachable = True
+        rows = _unpack_ifind_news(content)
         if _is_usable(rows):
-            return rows, True
-        # 源可达但当日无新闻（非交易日常态）→ 继续看其它 src 是否有
-    if reachable:
-        return [], True  # 某 src 可达但本期无新闻 → empty（不算未接入）
-    # 所有 src 不可达 → Wind 兜底（实测 2026-09-05：Wind 具体工具须经 wind_query(api_name=原始名)
-    # 调用，M2 改造后裸名 wind_get_financial_news 会 Unknown；返回 {data:{items:[{content,...}]}}）
+            _win(KIND_IFIND, "ifind_query")
+            return rows, True, prov
+        _attempt(KIND_IFIND, "ifind_query", ok=True, reason="可达但未返回结构化条目")
+    else:
+        _attempt(KIND_IFIND, "ifind_query", ok=False, reason="取数失败")
+
+    # —— ③ Wind 兜底（实测：具体工具须经 wind_query(api_name=原始名)，裸名会 Unknown）——
     content = await _call(
         tools, ctx, "wind_query",
         {"api_name": "get_financial_news",
          "params": {"query": f"{cfg.name} 算力 光模块 产业链 {d.isoformat()}"}},
         stage="news",
     )
-    rows = _unpack_wind_news(content)
-    if _is_usable(rows):
-        return rows, True
-    return [], False
+    if content is not None:
+        reachable = True
+        rows = _unpack_wind_news(content)
+        if _is_usable(rows):
+            _win(KIND_WIND, "wind_query")
+            return rows, True, prov
+        _attempt(KIND_WIND, "wind_query", ok=True, reason="可达但本期无条目")
+    else:
+        _attempt(KIND_WIND, "wind_query", ok=False, reason="取数失败")
+
+    # —— ④ Tushare news（实测全 40203，放最后）——
+    start = f"{d.isoformat()} 00:00:00"
+    end = f"{d.isoformat()} 23:59:59"
+    for src in cfg.news_sources:
+        content = await _call(
+            tools, ctx, "news", {"src": src, "start_date": start, "end_date": end}, stage="news"
+        )
+        if content is None:
+            _attempt(KIND_TUSHARE, "news", ok=False, reason=f"src={src} 取数失败")
+            continue
+        reachable = True
+        rows = _unpack_tushare_news(content)
+        if _is_usable(rows):
+            _win(KIND_TUSHARE, "news")
+            return rows, True, prov
+        _attempt(KIND_TUSHARE, "news", ok=True, reason=f"src={src} 可达但本期无条目")
+
+    # 某层可达但都无内容 → empty（不算未接入）；全层不可达 → na
+    return [], reachable, prov
+
+
+def _news_query(cfg: WatchlistConfig) -> str:
+    """iFind 的自然语言检索串：行业名 + 关键词（iFind 只吃一个 query，不是结构化字段）。"""
+    kw = " ".join(cfg.news_keywords[:6]) if cfg.news_keywords else "算力 光模块 产业链"
+    return f"{cfg.name} {kw}".strip()
+
+
+def _news_row(title: str, src: str, dt: str, url: str) -> dict[str, Any]:
+    """归一化的新闻行——**四层解包器的统一输出形状**。
+
+    统一形状是刻意的：下游 project_news 就不必再去猜各源五花八门的列名
+    （标题 / 资讯标题 / 新闻标题…），别名劫持风险从源头消失。
+    """
+    return {"title": title, "src": src, "datetime": dt, "url": url}
+
+
+def _unpack_free_headlines(
+    content: str, keywords: tuple[str, ...]
+) -> tuple[list[dict[str, Any]], bool]:
+    """免费源市场头条（裸数组，列 标题/摘要/发布时间/链接）→ (归一行, 是否命中过关键词)。
+
+    get_market_headlines 是**全市场**头条：实测同一批返回里既有
+    「华丰科技：224G 等高速背板连接器产品已开始批量交付」（相关），
+    也有「《全国渔业发展十五五规划》印发」（完全无关）。所以必须按关键词过滤。
+    一条都不命中时**退回最新 10 条并由调用方写 note**——诚实说明「没有产业链命中」，
+    比假装「本期无催化」要好（后者会被读成「今天产业链没事发生」）。
+    """
+    out: list[dict[str, Any]] = []
+    hits: list[dict[str, Any]] = []
+    for r in _extract_rows(content):
+        title = news_title_of(r)
+        if not title:
+            continue
+        src, dt = news_meta_of(r)
+        row = _news_row(title, src or "东方财富快讯", dt, news_url_of(r))
+        out.append(row)
+        if keywords:
+            blob = title + str(_get(r, "摘要") or "")
+            if any(k and k in blob for k in keywords):
+                hits.append(row)
+    if not keywords:
+        return out[:20], False
+    return (hits[:20], True) if hits else (out[:10], False)
+
+
+def _unpack_free_stock_news(content: str) -> list[dict[str, Any]]:
+    """免费源个股新闻（列 关键词/新闻标题/新闻内容/发布时间/文章来源/新闻链接）→ 归一行。"""
+    out: list[dict[str, Any]] = []
+    for r in _extract_rows(content)[:10]:
+        title = news_title_of(r)
+        if not title:
+            continue
+        src, dt = news_meta_of(r)
+        out.append(_news_row(title, src or "东方财富", dt, news_url_of(r)))
+    return out
+
+
+def _unpack_ifind_news(content: str | None) -> list[dict[str, Any]]:
+    """iFind search_news → 归一新闻行。
+
+    实测信封是**双重编码**：外层 code/msg/data，data 里还有一层 data 是 JSON 数组**字符串**，
+    内层记录列为 资讯标题 / 资讯内容 / 日期 / URL。标准 _extract_rows 对它只当
+    「单行探针」（返回 1 行、且那一行的唯一键是尚未解码的 data 字符串）→ 必须专用解包，
+    定位同 _unpack_wind_news。
+
+    若 data 只有 answer（markdown 表格或「未返回有效结果」提示）→ 返回 []，
+    诚实降级到下一层，不去解析 markdown（解析不确定，宁可换源）。
+    """
+    body = _parse_json_dict(content or "")
+    if body is None:
+        return []
+    data: Any = body.get("data")
+    if isinstance(data, str):
+        data = _parse_json_any(data)
+    if isinstance(data, dict):
+        inner = data.get("data")
+        data = _parse_json_any(inner) if isinstance(inner, str) else inner
+    if not isinstance(data, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for it in data[:20]:
+        if not isinstance(it, dict):
+            continue
+        title = news_title_of(it)
+        if not title:
+            continue
+        src, dt = news_meta_of(it)
+        out.append(_news_row(title, src or "同花顺iFind", dt, news_url_of(it)))
+    return out
+
+
+def _unpack_tushare_news(content: str) -> list[dict[str, Any]]:
+    """Tushare news → 归一新闻行（该源的行本就带 src/datetime/title 列）。"""
+    out: list[dict[str, Any]] = []
+    for r in _extract_rows(content)[:20]:
+        title = news_title_of(r)
+        if not title:
+            continue
+        src, dt = news_meta_of(r)
+        out.append(_news_row(title, src, dt, news_url_of(r)))
+    return out
+
+
+def _dedup_news(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按标题前 40 字去重、保序（头条与个股新闻常有同一条）。"""
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        key = str(r.get("title") or "")[:40]
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+    return out
+
+
+def _parse_json_any(text: str) -> Any:
+    """宽松 JSON 解析（可能是数组也可能是对象）；失败 → None。"""
+    try:
+        import json
+
+        return json.loads(text)
+    except (ValueError, TypeError):
+        return None
 
 
 def _unpack_wind_news(content: str | None) -> list[dict[str, Any]]:
@@ -608,15 +819,17 @@ async def build_report(
 
     async def stage(
         name: str,
-        coro: Callable[[], Awaitable[tuple[Any, bool]]],
+        coro: Callable[[], Awaitable[Any]],
         *,
-        empty: Any,
-    ) -> tuple[Any, bool]:
-        """段级超时/异常 → (该段的空值, False)（CancelledError 不在此列，照常透传）。
+        fallback: tuple[Any, ...],
+    ) -> Any:
+        """段级超时/异常 → 返回 `fallback`（CancelledError 不在此列，照常透传）。
 
-        `empty` 必须与该段正常返回的**类型一致**：行列表段传 `[]`、dict 段传 `{}`。
-        原先一律返回 `{}`，list 段拿到空 dict 只是「恰好」不炸（`for r in {}` 什么也不产、
-        `list({}) == []`），任何新增的切片/索引消费者都会崩在这里。
+        `fallback` 是**该段的整个返回值**，元数与类型都要与正常路径一致：
+        行列表段 `([], False)`、dict 段 `({}, False)`、带 provenance 的 news 段 `([], False, {})`。
+        原先一律返回 `({}, False)`，list 段拿到空 dict 只是「恰好」不炸
+        （`for r in {}` 什么也不产、`list({}) == []`），任何切片/索引消费者都会崩；
+        而 news 段改成三元返回后，二元 fallback 会直接在解包处 ValueError。
         """
         try:
             return await asyncio.wait_for(coro(), timeout=ctx.stage_timeout)
@@ -624,7 +837,7 @@ async def build_report(
             raise
         except Exception as exc:  # noqa: BLE001 - 段级超时/异常 → 该段 na（CancelledError 不在此列）
             ctx.error(name, name, f"阶段超时或异常（{type(exc).__name__}）", source=KIND_PIPELINE)
-            return empty, False
+            return fallback
 
     async def moneyflow_or_none() -> str | None:
         """moneyflow 快照：纳入段级超时（_call 本身无 wait_for——原先裸 await 不受 60s 保障，2026-09-07 审查）。"""
@@ -639,14 +852,14 @@ async def build_report(
 
     # 六段 + moneyflow 并行取数（模块 docstring 承诺的 asyncio.gather 语义；Semaphore(concurrency) 在此限流）。
     # 各函数自吞异常（仅 CancelledError 透传），gather 不会因某段失败中断其它段。
-    (board_rows, board_ok), flow_map, (watch_raw, watch_ok), (ann_rows, ann_ok), (fc_rows, fc_ok), (news_rows, news_ok), moneyflow = (
+    (board_rows, board_ok), flow_map, (watch_raw, watch_ok), (ann_rows, ann_ok), (fc_rows, fc_ok), (news_rows, news_ok, news_prov), moneyflow = (
         await asyncio.gather(
-            stage("board", lambda: _fetch_board(tools, ctx, cfg, day), empty=[]),
-            stage("board_flow", lambda: _fetch_board_flow(tools, ctx, cfg, day), empty={}),
-            stage("watchlist", lambda: _fetch_watchlist(tools, ctx, cfg, day), empty={}),
-            stage("announce", lambda: _fetch_announce(tools, ctx, cfg, day), empty=[]),
-            stage("forecast", lambda: _fetch_forecast(tools, ctx, cfg, day), empty=[]),
-            stage("news", lambda: _fetch_news(tools, ctx, cfg, day), empty=[]),
+            stage("board", lambda: _fetch_board(tools, ctx, cfg, day), fallback=([], False)),
+            stage("board_flow", lambda: _fetch_board_flow(tools, ctx, cfg, day), fallback=({}, False)),
+            stage("watchlist", lambda: _fetch_watchlist(tools, ctx, cfg, day), fallback=({}, False)),
+            stage("announce", lambda: _fetch_announce(tools, ctx, cfg, day), fallback=([], False)),
+            stage("forecast", lambda: _fetch_forecast(tools, ctx, cfg, day), fallback=([], False)),
+            stage("news", lambda: _fetch_news(tools, ctx, cfg, day), fallback=([], False, {})),
             moneyflow_or_none(),
         )
     )
@@ -672,24 +885,35 @@ async def build_report(
     board_section = _section(
         board_proj, board_rows, board_ok,
         note=None,
+        prov=_prov_of(board_rows, "provider", {"ths": "ths_daily", "sw": "sw_daily", "index": "index_daily"}),
     )
     watch_section = _section(
         {k: v for k, v in watch_raw.items() if not k.startswith("_")},
         watch_raw.get("rows", []), watch_ok,
         note=None,
+        prov={"src": KIND_TUSHARE, "src_tool": "daily"} if watch_ok else {},
     )
     announce_proj = project_announce(ann_rows, names_by_code)
     # ③ 业绩类行（forecast/express，已打 type/title）并入公告——模板三段过滤即含业绩预告；
     # 仅当公告主链成功（ann_ok）时并入：主链超时/全败（na）时保持 na，预告由第四段单独展示不顶替
     if fc_rows and ann_ok:
         announce_proj = project_announce(list(ann_rows) + fc_rows, names_by_code)
-    announce_section = _section(announce_proj, announce_proj["items"], ann_ok, note=None)
+    announce_section = _section(
+        announce_proj, announce_proj["items"], ann_ok, note=None,
+        prov={"src": KIND_TUSHARE, "src_tool": "stk_holdertrade/repurchase/block_trade"} if ann_ok else {},
+    )
     forecast_proj = project_forecast(fc_rows, names_by_code, up=cfg.thresholds.up, down=cfg.thresholds.down)
     forecast_proj["thresholds"] = {"up": cfg.thresholds.up, "down": cfg.thresholds.down}
-    forecast_section = _section(forecast_proj, forecast_proj["items"], fc_ok, note=None)
+    forecast_section = _section(
+        forecast_proj, forecast_proj["items"], fc_ok, note=None,
+        prov={"src": KIND_TUSHARE, "src_tool": "forecast/express"} if fc_ok else {},
+    )
     news_proj = project_news(news_rows)
-    news_section = _section(news_proj, news_proj["items"], news_ok,
-                            note=None if news_ok else "新闻接口未接入",)
+    news_section = _section(
+        news_proj, news_proj["items"], news_ok,
+        note=None if news_ok else "新闻接口未接入",
+        prov=news_prov,
+    )
 
     brief = build_brief(
         board_proj.get("rows", []),
@@ -725,15 +949,55 @@ async def build_report(
     }
 
 
-def _section(proj: dict[str, Any], rows: list[dict[str, Any]], chain_ok: bool, *, note: str | None) -> dict[str, Any]:
-    """段封装：status = ok（有行）| empty（链成功但本期无）| na（未接入/全败）；note 供前端补充说明。"""
+def _prov_of(
+    rows: list[dict[str, Any]], key: str, tool_by_value: dict[str, str]
+) -> dict[str, Any]:
+    """从行里的来源标记（如 board 行的 `provider`）反推该段实际由哪个工具服务。
+
+    board 段是三环降级链，哪一环命中只有行自己知道（`provider` ∈ ths/sw/index）——
+    与其在取数函数里再串一路返回值，不如从已有的行标记反推。取首行的标记：
+    同一段的行必然来自同一环（每环命中即 return）。
+    """
+    for r in rows:
+        val = str(r.get(key) or "")
+        if val in tool_by_value:
+            return {"src": KIND_TUSHARE, "src_tool": tool_by_value[val]}
+    return {}
+
+
+def _section(
+    proj: dict[str, Any],
+    rows: list[dict[str, Any]],
+    chain_ok: bool,
+    *,
+    note: str | None,
+    prov: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """段封装：status = ok（有行）| empty（链成功但本期无）| na（未接入/全败）；note 供前端补充说明。
+
+    `prov` = 该段的取数溯源（`src` 源类别 / `src_tool` 实际工具名 / `src_label` 展示名 /
+    `attempts` 按序尝试记录）。**随报文归档**是刻意的：报文按日存档、前端支持历史回看，
+    而 /status 那种「实时」视角看历史报告会把今天的来源贴到上周的数据上。
+    `fetched_at` 让看板能显示「这一段是什么时候取的」。
+    """
     if rows:
         status = "ok"
     elif chain_ok:
         status = "empty"
     else:
         status = "na"
-    return {"status": status, "note": note, **proj}
+    prov = dict(prov or {})
+    src = prov.get("src")
+    return {
+        "status": status,
+        "note": note or prov.get("note"),
+        "src": src,
+        "src_tool": prov.get("src_tool"),
+        "src_label": source_label(src) if src else None,
+        "attempts": prov.get("attempts", []),
+        "fetched_at": datetime.now(cn_tz()).isoformat(timespec="seconds"),
+        **proj,
+    }
 
 
 def _merge_flow(rows: list[dict[str, Any]], flow_map: dict[str, float | None]) -> list[dict[str, Any]]:

@@ -19,7 +19,6 @@ from demomcp.graph.tracker_render import (
     _CLOSE,
     _FOR_REASON,
     _INFLOW,
-    _NEWS,
     _PCT,
     _REMARK,
     _fmt_pct,
@@ -32,6 +31,7 @@ from demomcp.graph.tracker_render import (
 )
 from demomcp.quickreport.predicate import (
     news_meta_of,
+    news_title_of,
     news_url_of,
     range_hit,
     scope_of,
@@ -306,10 +306,18 @@ def _fmt_range(p_min: float | None, p_max: float | None) -> str:
 
 
 def project_news(rows: list[dict[str, Any]], limit: int = 20) -> dict[str, Any]:
-    """新闻/催化行投影：title/src/datetime/url。"""
+    """新闻/催化行投影：title/src/datetime/url。
+
+    标题走 `predicate.news_title_of`（predicate 自持的别名表）而不是 `tracker_render._NEWS`——
+    后者匹配不到免费源的 `标题` 与 iFind 的 `资讯标题`（别名须是 key 的子串，
+    `新闻标题` 不是 `标题` 的子串），会让整段静默变空。tracker_render 契约上零改动。
+
+    注：管线里各层解包器已把行归一成 {title,src,datetime,url}，这里的别名兜底
+    是给「未经解包器的裸行」（如 Tushare news 层）与将来的形状漂移留的网。
+    """
     items: list[dict[str, Any]] = []
     for r in rows:
-        title = _text(_get(r, *_NEWS))
+        title = _text(news_title_of(r))
         if not title:
             continue
         src, dt = news_meta_of(r)

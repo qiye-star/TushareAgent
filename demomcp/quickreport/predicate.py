@@ -21,10 +21,20 @@ _YOY_RANGE_MAX = ("p_change_max", "p_change_up", "net_profit_yoy_high", "预告�
 _YOY_SINGLE = ("yoy_net_profit", "net_profit_yoy", *_FOR_YOY)
 # 预告区间/报告期标识
 _SCOPE = ("period", "end_date", "ann_date", "report_date", "公告期", "报告期")
-# 新闻元信息
-_NEWS_SRC = ("src", "source", "媒体", "来源")
-_NEWS_TIME = ("datetime", "publish_time", "pub_time", "新闻时间", "发布时间")
-_NEWS_URL = ("url", "link", "链接")
+# 新闻元信息。**中文列名必须排在前面**：`tracker_render._get` 是「别名作为 key 的小写子串」
+# 匹配、首命中即返回，所以更具体的名字要先试（`资讯标题` 之于 `标题`）。
+# 实测各源真实列名（2026-09-08，逐个实调）：
+#   china_news.get_market_headlines -> 标题 / 摘要 / 发布时间 / 链接
+#   china_news.get_stock_news       -> 关键词 / 新闻标题 / 新闻内容 / 发布时间 / 文章来源 / 新闻链接
+#   ifind_query(search_news)        -> 资讯标题 / 资讯内容 / 日期 / URL
+# tracker_render._NEWS 只有 ("title","新闻标题","content",...)：`标题`/`资讯标题` 都匹配不上
+# （别名要是 key 的子串，`新闻标题` 不是 `标题` 的子串），`日期` 也匹配不上 _NEWS_TIME
+# → 标题与时间会被静默丢空、project_news 再把无标题的行过滤掉，整段变 empty。
+# 这几张表在 predicate 自持（tracker_render 契约上零改动）。
+_NEWS_TITLE = ("资讯标题", "新闻标题", "标题", "title", "content", "summary", "text", "新闻内容")
+_NEWS_SRC = ("文章来源", "来源", "媒体", "src", "source")
+_NEWS_TIME = ("发布时间", "新闻时间", "日期", "datetime", "publish_time", "pub_time", "date")
+_NEWS_URL = ("新闻链接", "链接", "url", "link")
 
 
 def forecast_hit(value: float | None, *, up: float = 50.0, down: float = -20.0) -> bool:
@@ -83,6 +93,11 @@ def _guard_pct(v: float | None) -> float | None:
 def scope_of(row: dict[str, Any]) -> str:
     """预告期标识（如 20260930 / 2026Q3），取不到 → ""。"""
     return str(_get(row, *_SCOPE) or "")
+
+
+def news_title_of(row: dict[str, Any]) -> str:
+    """新闻标题；取不到 → ""（调用方据此丢弃该行——无标题的新闻条目没有展示价值）。"""
+    return str(_get(row, *_NEWS_TITLE) or "")
 
 
 def news_meta_of(row: dict[str, Any]) -> tuple[str, str]:
