@@ -150,3 +150,127 @@ def test_history_endpoints(client) -> None:
     assert r.json()["date"] == "2026-09-03"
 
     assert c.get("/api/quickreport/report/2020-01-01").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Phase 4：GET /api/quickreport/status（纯读，不触发 MCP）
+# ---------------------------------------------------------------------------
+
+
+def _mk_watchlist(tmp) -> None:
+    import json as _json
+
+    watch = {
+        "name": "AI算力产业链",
+        "watchlist": [{"name": "新易盛", "ts_code": "300502.SZ"}],
+        "board": {"th_concepts": [], "sw_indexes": [], "indexes": [], "dc_flow": False},
+        "schedule": {"hour": 8, "minute": 30, "tz": "Asia/Shanghai"},
+        "news_sources": [],
+    }
+    (tmp / "watchlist.json").write_text(_json.dumps(watch, ensure_ascii=False), encoding="utf-8")
+
+
+def test_status_when_not_generated(client) -> None:
+    """未生成时也要 200（前端据此显示「尚未生成 + 下次几点跑」），且**不建任何 MCP 连接**。"""
+    c, tmp, _ = client
+    _mk_watchlist(tmp)
+    r = c.get("/api/quickreport/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["exists"] is False
+    # 调度信息来自 watchlist.json + 本地时钟，与报文是否存在无关
+    assert body["config_ok"] is True
+    assert body["schedule"] == {"hour": 8, "minute": 30, "tz": "Asia/Shanghai"}
+    assert body["required_sections"] == ["board", "watchlist"]
+    assert body["running"] is False
+    # 时间戳必须带 UTC 偏移：前端 formatTime 对无偏移串会补 Z 当 UTC，会早显示 8 小时
+    assert body["server_time"].endswith("+08:00")
+    # QUICKREPORT_AUTO=false（测试）→ 不给 next_run_at（给了会显示一个永不到来的时刻）
+    assert body["auto"] is False
+    assert body["next_run_at"] is None
+
+
+def test_status_reports_sections_and_provenance(client) -> None:
+    """生成后：各段 status/来源/条数 + 缺段 + 错误分布，都要能从 /status 一次读到。"""
+    c, tmp, _ = client
+    _mk_watchlist(tmp)
+    from demomcp.quickreport.store import save_report
+
+    save_report({
+        "version": 1,
+        "generated_at": "2026-09-08T15:20:56+08:00",
+        "date": "2026-09-07",
+        "sector": "AI算力产业链",
+        "missing": ["news"],
+        "errors": [
+            {"stage": "news", "tool": "get_market_headlines", "reason": "取数失败", "source": "free"},
+            {"stage": "news", "tool": "news", "reason": "权限受限", "source": "tushare"},
+        ],
+        "board": {"status": "ok", "src": "tushare", "src_tool": "index_daily",
+                  "src_label": "Tushare 官方 MCP", "fetched_at": "2026-09-08T15:20:50+08:00",
+                  "attempts": [], "rows": [{"name": "上证指数"}], "series_status": "ok"},
+        "watchlist": {"status": "ok", "src": "tushare", "src_tool": "daily", "src_label": "T",
+                      "attempts": [], "rows": [{"name": "a"}, {"name": "b"}]},
+        "announce": {"status": "empty", "src": None, "src_tool": None, "attempts": [], "items": []},
+        "forecast": {"status": "empty", "src": None, "src_tool": None, "attempts": [], "items": []},
+        "news": {"status": "na", "note": "新闻接口未接入", "src": None, "src_tool": None,
+                 "attempts": [{"source": "free", "tool": "get_market_headlines", "ok": False}],
+                 "items": []},
+        "brief": {"text": "x", "chars": 1},
+    })
+    body = c.get("/api/quickreport/status").json()
+    assert body["exists"] is True
+    assert body["date"] == "2026-09-07"
+    assert body["generated_hhmm"] == "15:20"
+    assert body["missing"] == ["news"]
+    # 必需段（board/watchlist）都在 → 缺的只有可选段，调度器不会因此全量重跑
+    assert body["missing_required"] == []
+    assert body["sections"]["board"]["src_tool"] == "index_daily"
+    assert body["sections"]["board"]["count"] == 1
+    assert body["sections"]["watchlist"]["count"] == 2
+    assert body["sections"]["news"]["status"] == "na"
+    assert body["sections"]["news"]["note"] == "新闻接口未接入"
+    assert body["sections"]["news"]["attempts"][0]["tool"] == "get_market_headlines"
+    assert body["errors_count"] == 2
+    assert body["errors_by_source"] == {"free": 1, "tushare": 1}
+    assert body["series_status"] == "ok"
+
+
+def test_status_surfaces_and_clears_last_error(client) -> None:
+    """last_error 要能被读出来（此前只写不读），且成功生成后被清掉。"""
+    c, tmp, _ = client
+    _mk_watchlist(tmp)
+    from demomcp.quickreport.store import (
+        clear_last_error,
+        load_last_error,
+        save_last_error,
+    )
+
+    assert load_last_error() is None
+    save_last_error({"at": "2026-09-08T03:12:00+08:00", "error": "网关不可达"})
+    body = c.get("/api/quickreport/status").json()
+    assert body["last_error"]["error"] == "网关不可达"
+
+    clear_last_error()
+    assert c.get("/api/quickreport/status").json()["last_error"] is None
+    clear_last_error()  # 幂等：文件已不存在也不该抛
+
+
+def test_status_missing_required_flags_broken_core_section(client) -> None:
+    """必需段真的缺（board na）→ missing_required 非空，前端据此显示「下次触发会重试」。"""
+    c, tmp, _ = client
+    _mk_watchlist(tmp)
+    from demomcp.quickreport.store import save_report
+
+    save_report({
+        "version": 1, "generated_at": "2026-09-08T15:20:56+08:00", "date": "2026-09-07",
+        "sector": "s", "missing": ["board"], "errors": [],
+        "board": {"status": "na", "rows": []},
+        "watchlist": {"status": "ok", "rows": [{"name": "a"}]},
+        "announce": {"status": "ok", "items": []},
+        "forecast": {"status": "ok", "items": []},
+        "news": {"status": "ok", "items": []},
+        "brief": {"text": "x", "chars": 1},
+    })
+    body = c.get("/api/quickreport/status").json()
+    assert body["missing_required"] == ["board"]

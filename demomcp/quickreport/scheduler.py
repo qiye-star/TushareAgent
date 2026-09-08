@@ -22,7 +22,14 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from demomcp.quickreport.config import ConfigError, Schedule, WatchlistConfig, cn_tz
+from demomcp.quickreport.config import (
+    DEFAULT_REQUIRED_SECTIONS,
+    ConfigError,
+    Schedule,
+    WatchlistConfig,
+    cn_tz,
+)
+from demomcp.quickreport.server import required_missing
 from demomcp.quickreport.store import load_report, save_last_error
 
 log = logging.getLogger("quickreport")
@@ -115,15 +122,21 @@ async def _run_once(
 
         ctx = _Ctx(asyncio.Semaphore(concurrency), stage_timeout)
         expected = await resolve_report_date(tools, ctx, None)
-        if _is_latest_complete(expected):
+        # 解析日期时的 trade_cal 失败原先随这个临时 ctx 一起被丢掉，什么也不留
+        for e in ctx.errors:
+            log.warning("快报日期解析告警：%s/%s %s", e["stage"], e["tool"], e["reason"])
+        if _is_latest_complete(expected, cfg.required_sections):
             log.info("快报已是最新（%s），跳过生成", expected)
             return
         # 与手动端点共用同一把锁：持锁期间对方可能刚生成完 → 锁内复查
         async with lock if lock is not None else nullcontext():
-            if _is_latest_complete(expected):
+            if _is_latest_complete(expected, cfg.required_sections):
                 log.info("快报已是最新（%s），跳过生成", expected)
                 return
-            report = await generate_from(tools, cfg, None, stage_timeout=stage_timeout, concurrency=concurrency)
+            # 把已解析好的日期传下去：省一次 trade_cal，且守卫与生成不会在跨零点时各算出一个日期
+            report = await generate_from(
+                tools, cfg, expected, stage_timeout=stage_timeout, concurrency=concurrency
+            )
         log.info(
             "快报已生成：%s missing=%s errors=%d",
             report.get("date"), report.get("missing"), len(report.get("errors", [])),
@@ -133,9 +146,36 @@ async def _run_once(
             await release_tools(tools)
 
 
-def _is_latest_complete(expected: str) -> bool:
-    """去重守卫：最新报告的日期 == 预期日 **且无缺段**（missing 非空 = 部分降级，不算最新，下次触发重试）。"""
+_MIN_RETRY_GAP = 900.0  # 15 分钟：必需段缺失时的重试护栏，防 restart 抖动里反复刷接口
+
+
+def _is_latest_complete(
+    expected: str, required: tuple[str, ...] = DEFAULT_REQUIRED_SECTIONS
+) -> bool:
+    """去重守卫：日期 == 预期日 **且 required 段无一为 na**。
+
+    改造前要求 `missing == []`（任一段缺失都算不最新）。后果：news 长期 40203 无权限
+    → missing 恒非空 → **每次进程启动都把 211 只票的三张全市场快照 + 公告三源 + 预告批拉
+    整套重跑一遍**，而重跑并不会让 news 忽然有权限。既烧配额，又让「到底更新过没有」无从判断。
+
+    现在只看必需段（默认 board/watchlist）。必需段真的缺时仍然重试，但加 15 分钟护栏——
+    否则 docker `restart: unless-stopped` 下的崩溃循环会变成对上游接口的高频刷取。
+    """
     latest = load_report()
     if not latest or str(latest.get("date", "")).replace("-", "") != expected:
         return False
-    return not (latest.get("missing") or [])
+    stale = required_missing(latest, required)
+    if not stale:
+        return True
+    return _within_retry_gap(latest)
+
+
+def _within_retry_gap(latest: dict[str, Any]) -> bool:
+    """上次生成距今是否还在 `_MIN_RETRY_GAP` 内（在 → 先别重试）。"""
+    try:
+        gen = datetime.fromisoformat(str(latest.get("generated_at") or ""))
+    except ValueError:
+        return False
+    if gen.tzinfo is None:  # 历史存档可能没带偏移，按北京时间解释（本模块全程 cn_tz）
+        gen = gen.replace(tzinfo=cn_tz())
+    return (datetime.now(cn_tz()) - gen).total_seconds() < _MIN_RETRY_GAP

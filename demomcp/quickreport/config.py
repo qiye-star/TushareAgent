@@ -68,6 +68,11 @@ class StockCfg:
     remark: str = ""
 
 
+# 五个取数段的段名（brief 是派生段、不参与 status/missing 语义）
+SECTION_NAMES: tuple[str, ...] = ("board", "watchlist", "announce", "forecast", "news")
+DEFAULT_REQUIRED_SECTIONS: tuple[str, ...] = ("board", "watchlist")
+
+
 @dataclass(frozen=True)
 class IndexSeriesCfg:
     """一条指数走势序列：展示名 + **显式** ts_code。
@@ -123,6 +128,11 @@ class WatchlistConfig:
     # 依赖后者的结果就得串行化；且调用次数必须有界（211 只逐个调不可接受）。
     news_stock_codes: tuple[str, ...] = ()
     display_limit: int = 100
+    # 「必需段」：只有这些段缺失（status=na）才让调度器判定「这份报告不算最新、下次触发重试」。
+    # 默认只有板块与标的池：news 长期无权限、forecast 一年里大部分时间合法地 empty、
+    # announce 依赖三个各自独立权限的接口——把它们算进必需项会让每次进程启动都全量重跑一遍，
+    # 而重跑并不会让 news 忽然有权限。
+    required_sections: tuple[str, ...] = DEFAULT_REQUIRED_SECTIONS
 
     # —— 便捷访问（pipeline 用）——
     def codes(self) -> list[str]:
@@ -193,10 +203,25 @@ class WatchlistConfig:
                 # 硬上限 5 只：每只一次远端调用，配置写多了会把 news 段拖过段级超时
                 news_stock_codes=tuple(str(x) for x in data.get("news_stock_codes", []) if x)[:5],
                 display_limit=int(data.get("display_limit", 100)),
+                required_sections=_parse_required(data.get("sections")),
             )
         except (TypeError, ValueError) as exc:  # 字段类型不对（如 thresholds.up 是字符串）
             print(f"[quickreport] watchlist 配置解析失败：{exc}")
             return None
+
+
+def _parse_required(raw: Any) -> tuple[str, ...]:
+    """sections.required 配置 → 段名元组。
+
+    **与 SECTION_NAMES 求交**：拼错的名字要丢掉而不是保留——留着会让
+    `required_missing` 永远找不到它、守卫退化成「永远完整」，一个 typo 就静默关掉了重试。
+    交集为空（全拼错 / 配了空数组）→ 回落默认值。
+    """
+    names: Any = raw.get("required") if isinstance(raw, dict) else raw
+    if not isinstance(names, list):
+        return DEFAULT_REQUIRED_SECTIONS
+    picked = tuple(str(x) for x in names if str(x) in SECTION_NAMES)
+    return picked or DEFAULT_REQUIRED_SECTIONS
 
 
 def _parse_series(raw: Any) -> tuple[IndexSeriesCfg, ...]:

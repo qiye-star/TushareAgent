@@ -11,7 +11,7 @@ from typing import Any
 from demomcp.interfaces.tool_provider import ToolProvider
 from demomcp.quickreport.config import ConfigError, WatchlistConfig, watchlist_path
 from demomcp.quickreport.pipeline import build_report
-from demomcp.quickreport.store import load_report, save_report
+from demomcp.quickreport.store import clear_last_error, load_report, save_report
 
 
 async def generate_from(
@@ -36,6 +36,8 @@ async def generate_from(
     )
     if save:
         save_report(report)
+        # 成功生成就清掉旧的失败记录，否则一次陈年失败会永久挂在状态看板上
+        clear_last_error()
     return report
 
 
@@ -44,19 +46,73 @@ def load_latest() -> dict[str, Any] | None:
     return load_report()
 
 
+SECTION_NAMES: tuple[str, ...] = ("board", "watchlist", "announce", "forecast", "news")
+
+
 def status_from(report: dict[str, Any] | None) -> dict[str, Any]:
-    """健康行摘要（供 /api/quickreport/latest 与调试复用）。"""
+    """健康行摘要（供 /api/quickreport/status 与调试复用）。
+
+    `None` → 恰好 `{"exists": False}`（被 test_quickreport_store.py 锁定，别加字段）。
+    非 None 分支带上各段 provenance，让前端来源看板能显示「这一段由哪个源、哪个工具服务」。
+    """
     if report is None:
         return {"exists": False}
     g = report.get("generated_at") or ""
     try:
-        g = str(g).split("T")[1][:5]  # HH:MM
+        hhmm = str(g).split("T")[1][:5]  # HH:MM
     except IndexError:
-        g = ""
+        hhmm = ""
+    sections: dict[str, Any] = {}
+    for name in SECTION_NAMES:
+        sec = report.get(name)
+        if not isinstance(sec, dict):
+            continue
+        rows = sec.get("rows") if isinstance(sec.get("rows"), list) else sec.get("items")
+        sections[name] = {
+            "status": sec.get("status"),
+            "src": sec.get("src"),
+            "src_tool": sec.get("src_tool"),
+            "src_label": sec.get("src_label"),
+            "note": sec.get("note"),
+            "count": len(rows) if isinstance(rows, list) else None,
+            "fetched_at": sec.get("fetched_at"),
+            "attempts": sec.get("attempts", []),
+        }
+    errors = report.get("errors") if isinstance(report.get("errors"), list) else []
+    by_source: dict[str, int] = {}
+    for e in errors:
+        if isinstance(e, dict):
+            key = str(e.get("source") or "unknown")
+            by_source[key] = by_source.get(key, 0) + 1
     return {
         "exists": True,
         "generated_at": report.get("generated_at"),
         "date": report.get("date"),
         "missing": report.get("missing", []),
-        "generated_hhmm": g,
+        "generated_hhmm": hhmm,
+        "sector": report.get("sector"),
+        "version": report.get("version"),
+        "sections": sections,
+        "errors_count": len(errors),
+        "errors_by_source": by_source,
+        "series_status": (report.get("board") or {}).get("series_status")
+        if isinstance(report.get("board"), dict)
+        else None,
     }
+
+
+def required_missing(report: dict[str, Any] | None, required: tuple[str, ...]) -> list[str]:
+    """`required` 里 status 为 na 的段名。
+
+    **从段 status 反算**而不是读一个新增的顶层键：旧的 latest.json / history 存档里
+    没有那个键，但五段的 status 一直都在——向后兼容零迁移。
+    """
+    if not report:
+        return list(required)
+    out: list[str] = []
+    for name in required:
+        sec = report.get(name)
+        status = str((sec or {}).get("status") or "na") if isinstance(sec, dict) else "na"
+        if status == "na":
+            out.append(name)
+    return out

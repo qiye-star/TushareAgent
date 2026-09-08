@@ -777,6 +777,50 @@ async def quickreport_generate(req: QuickReportRequest) -> dict[str, Any]:
     return report
 
 
+@app.get("/api/quickreport/status")
+async def quickreport_status() -> dict[str, Any]:
+    """快报健康状态：数据新鲜度 + 各段来源 + 调度信息 + 上次失败原因。
+
+    **纯读**（latest.json / last_error.json / watchlist.json + 本地时钟），
+    **不触发任何 MCP 连接**——与 /latest 同样离线安全，前端可以放心按秒级轮询。
+
+    时间戳一律带 UTC 偏移：前端 `lib/format.ts::formatTime` 见到无偏移的串会补 `Z`
+    当 UTC 解析（那是为 SQLite CURRENT_TIMESTAMP 准备的），一个不带偏移的北京墙钟串
+    会被显示成早 8 小时。`server_time` 不是可选项——「距下次生成还有多久」必须用
+    `next_run_at - server_time` 再套到客户端时钟上，否则机器时钟一歪这个看板就在说谎，
+    而它恰恰是别的都不可信时你要看的那个东西。
+    """
+    from datetime import datetime
+
+    from demomcp.quickreport.config import WatchlistConfig, cn_tz
+    from demomcp.quickreport.scheduler import next_run_dt
+    from demomcp.quickreport.server import load_latest, required_missing, status_from
+    from demomcp.quickreport.store import load_last_error
+
+    settings = app.state.settings
+    cfg = WatchlistConfig.load()
+    report = load_latest()
+    now_cn = datetime.now(cn_tz())
+    auto = bool(settings.quickreport_enabled and settings.quickreport_auto)
+    return {
+        **status_from(report),
+        "server_time": now_cn.isoformat(timespec="seconds"),
+        "auto": auto,
+        "running": app.state.quickreport_lock.locked(),
+        "config_ok": cfg is not None,
+        "schedule": None
+        if cfg is None
+        else {"hour": cfg.schedule.hour, "minute": cfg.schedule.minute, "tz": cfg.schedule.tz},
+        # 未开启定时任务时不给 next_run_at：给了会让前端显示一个永不到来的时刻
+        "next_run_at": next_run_dt(now_cn, cfg.schedule).isoformat()
+        if (cfg is not None and auto)
+        else None,
+        "required_sections": list(cfg.required_sections) if cfg else [],
+        "missing_required": required_missing(report, cfg.required_sections) if cfg else [],
+        "last_error": load_last_error(),
+    }
+
+
 @app.get("/api/quickreport/history")
 async def quickreport_history() -> list[dict[str, Any]]:
     """历史快报摘要列表（日期降序）：{date, generated_at, missing, status_ok}。"""

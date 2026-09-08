@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -100,3 +101,24 @@ def save_last_error(entry: dict[str, Any]) -> Path:
     p = last_error_path()
     _atomic_write(p, entry)
     return p
+
+
+def load_last_error() -> dict[str, Any] | None:
+    """读最近一次生成失败的记录（缺失/损坏 → None）。
+
+    `save_last_error` 从加进来那天起就只有写没有读——状态看板要显示「上次为什么没跑成」，
+    这半边必须补上，否则那个文件永远是个死产物。
+    """
+    p = last_error_path()
+    try:
+        with open(p, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def clear_last_error() -> None:
+    """成功生成后清掉失败记录——否则一次旧失败会永久挂在看板上。"""
+    with contextlib.suppress(OSError):
+        last_error_path().unlink(missing_ok=True)
