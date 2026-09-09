@@ -147,3 +147,29 @@ export function pctClass(n: number | null | undefined): string {
   if (n == null || n === 0) return 'text-zinc-500 dark:text-zinc-400'
   return n > 0 ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'
 }
+
+/**
+ * 相对时间："22 小时前" / "还有 16 小时 54 分" / "即将到来"。
+ *
+ * `nowIso` 应传后端 /status 的 `server_time`（而不是省略走 `Date.now()`）——
+ * 「距下次生成还有多久」这种数字，机器时钟一歪就会说谎，而它恰恰是快报数据源看板上
+ * 用户在别的都不可信时最想确认的那个东西。`nowIso` 缺省仍回退客户端时钟，
+ * 让调用方在 /status 还没返回时也能先渲染一个大致值。
+ * 复用 formatTime 同样的「无偏移串补 Z」规则，避免早 8 小时的老问题重演。
+ */
+export function formatRelative(iso: string | null, nowIso?: string | null): string {
+  if (!iso) return ''
+  const normalize = (s: string) => (/(?:Z|[+-]\d{2}:?\d{2})$/.test(s) ? s : `${s}Z`)
+  const target = new Date(normalize(iso))
+  const now = nowIso ? new Date(normalize(nowIso)) : new Date()
+  if (Number.isNaN(target.getTime()) || Number.isNaN(now.getTime())) return ''
+  const diffMs = target.getTime() - now.getTime()
+  const future = diffMs > 0
+  const abs = Math.abs(diffMs)
+  const minutes = Math.round(abs / 60000)
+  if (minutes < 1) return future ? '即将到来' : '刚刚'
+  const hours = Math.floor(minutes / 60)
+  const mins = minutes % 60
+  const label = hours > 0 ? `${hours} 小时${mins > 0 ? ` ${mins} 分` : ''}` : `${mins} 分钟`
+  return future ? `还有 ${label}` : `${label}前`
+}

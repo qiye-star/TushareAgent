@@ -34,12 +34,40 @@ export interface PoolInflow {
   text: string | null
 }
 
+/** 段级取数来源（provenance）。随报文归档——报文按日存档、支持历史回看，
+ *  这份「哪个源服务了这一段」必须和数据本身一起存，不能只放实时的 /status。 */
+export interface SectionSource {
+  id: string | null
+  label: string | null
+  tool: string | null
+}
+
+export interface IndexSeriesPoint {
+  date: string
+  open: number | null
+  close: number | null
+  low: number | null
+  high: number | null
+  volume: number | null
+}
+
+export interface IndexSeries {
+  name: string
+  code: string
+  points: IndexSeriesPoint[]
+  lastPct: number | null
+  lastPctText: string | null
+}
+
 export interface BoardSection {
   status: SectionStatus
   note: string | null
   rows: BoardRow[]
   top_inflow: TopInflowItem[]
   pool_inflow: PoolInflow | null
+  source: SectionSource | null
+  series: IndexSeries[]
+  seriesStatus: SectionStatus | null
 }
 
 export interface WatchRow {
@@ -56,6 +84,18 @@ export interface WatchRow {
   remark: string
 }
 
+/** 全池统计（**截断前**口径）。`projection.join_watchlist` 的 `rows` 已按 display_limit
+ *  截断（211 只的池子只剩 100 只），前端若从 `rows` 自算涨跌家数/均幅只是一个样本，
+ *  不是总体——`stats` 是后端在截断之前算好的全池数字，必须优先使用。 */
+export interface WatchlistStats {
+  up: number
+  down: number
+  flat: number
+  avgPct: number | null
+  medianPct: number | null
+  computedOver: number
+}
+
 export interface WatchlistSection {
   status: SectionStatus
   note: string | null
@@ -65,6 +105,8 @@ export interface WatchlistSection {
   total_count: number
   missing_codes: number
   rows: WatchRow[]
+  source: SectionSource | null
+  stats: WatchlistStats | null
 }
 
 export interface AnnounceItem {
@@ -80,6 +122,7 @@ export interface AnnounceSection {
   note: string | null
   limit: number
   items: AnnounceItem[]
+  source: SectionSource | null
 }
 
 export interface ForecastItem {
@@ -99,6 +142,7 @@ export interface ForecastSection {
   thresholds: { up: number; down: number }
   hit_count: number
   items: ForecastItem[]
+  source: SectionSource | null
 }
 
 export interface NewsItem {
@@ -112,6 +156,9 @@ export interface NewsSection {
   status: SectionStatus
   note: string | null
   items: NewsItem[]
+  source: SectionSource | null
+  /** 各层的尝试记录（免费源/iFind/Wind/Tushare），供数据源看板展示降级过程。 */
+  attempts: { source: string; tool: string; ok: boolean; reason?: string }[]
 }
 
 export interface BriefSection {
@@ -123,6 +170,7 @@ export interface QuickReportError {
   stage: string
   tool: string
   reason: string
+  source: string | null
 }
 
 export interface QuickReport {
@@ -166,6 +214,99 @@ function asStrList(v: unknown): string[] {
 
 function secStatus(v: unknown): SectionStatus | null {
   return isObj(v) ? asStatus(v.status) : null
+}
+
+function asOptStr(v: unknown): string | null {
+  return typeof v === 'string' && v !== '' ? v : null
+}
+
+function asSource(v: unknown): SectionSource | null {
+  if (!isObj(v)) return null
+  const id = asOptStr(v.src)
+  const label = asOptStr(v.src_label)
+  const tool = asOptStr(v.src_tool)
+  if (id === null && label === null && tool === null) return null
+  return { id, label, tool }
+}
+
+function asAttempts(v: unknown): NewsSection['attempts'] {
+  return asList(v).flatMap((a) => {
+    if (!isObj(a)) return []
+    return [
+      {
+        source: asStr(a.source),
+        tool: asStr(a.tool),
+        ok: a.ok === true,
+        ...(typeof a.reason === 'string' ? { reason: a.reason } : {}),
+      },
+    ]
+  })
+}
+
+/** `20260907` / `2026-09-07` → `2026-09-07`；空/无法识别 → 原样返回。 */
+function normalizeSeriesDate(v: unknown): string {
+  const s = asStr(v)
+  if (/^\d{8}$/.test(s)) return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6)}`
+  return s
+}
+
+/**
+ * board.series（后端 array-of-arrays，fields=[date,open,close,low,high,volume]）→ IndexSeries[]。
+ * 无日期/无收盘的行丢弃；空序列整条丢弃（图例挂着一条空序列比少一条更糟）。
+ */
+function asIndexSeries(v: unknown): IndexSeries[] {
+  return asList(v).flatMap((s) => {
+    if (!isObj(s)) return []
+    const fields = asStrList(s.fields)
+    const idx = (name: string) => fields.indexOf(name)
+    const iDate = idx('date')
+    const iOpen = idx('open')
+    const iClose = idx('close')
+    const iLow = idx('low')
+    const iHigh = idx('high')
+    const iVol = idx('volume')
+    const rawRows = Array.isArray(s.rows) ? s.rows : []
+    const points: IndexSeriesPoint[] = rawRows.flatMap((r) => {
+      if (!Array.isArray(r)) return []
+      const date = iDate >= 0 ? normalizeSeriesDate(r[iDate]) : ''
+      const close = iClose >= 0 ? asNum(r[iClose]) : null
+      if (!date || close === null) return []
+      return [
+        {
+          date,
+          open: iOpen >= 0 ? asNum(r[iOpen]) : null,
+          close,
+          low: iLow >= 0 ? asNum(r[iLow]) : null,
+          high: iHigh >= 0 ? asNum(r[iHigh]) : null,
+          volume: iVol >= 0 ? asNum(r[iVol]) : null,
+        },
+      ]
+    })
+    if (points.length === 0) return []
+    const last = isObj(s.last) ? s.last : null
+    return [
+      {
+        name: asStr(s.name),
+        code: asStr(s.code),
+        points,
+        lastPct: last ? asNum(last.pct) : null,
+        lastPctText: last && last.pct_text != null ? asStr(last.pct_text, null as unknown as string) : null,
+      },
+    ]
+  })
+}
+
+function asWatchStats(v: unknown): WatchlistStats | null {
+  if (!isObj(v)) return null
+  const n = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) ? x : 0)
+  return {
+    up: n(v.up),
+    down: n(v.down),
+    flat: n(v.flat),
+    avgPct: asNum(v.avg_pct),
+    medianPct: asNum(v.median_pct),
+    computedOver: n(v.computed_over),
+  }
 }
 
 /**
@@ -213,7 +354,9 @@ export function parseQuickReport(v: unknown): QuickReport | null {
     date: v.date,
     sector: asStr(v.sector, 'AI算力产业链'),
     missing: asStrList(v.missing),
-    errors: asList(v.errors).flatMap((e) => (isObj(e) ? [{ stage: asStr(e.stage), tool: asStr(e.tool), reason: asStr(e.reason) }] : [])),
+    errors: asList(v.errors).flatMap((e) =>
+      isObj(e) ? [{ stage: asStr(e.stage), tool: asStr(e.tool), reason: asStr(e.reason), source: asOptStr(e.source) }] : [],
+    ),
     board: {
       status: board.status,
       note: board.note,
@@ -245,6 +388,9 @@ export function parseQuickReport(v: unknown): QuickReport | null {
                 : asStr((boardObj.pool_inflow as Record<string, unknown>).text, null as unknown as string),
           }
         : null,
+      source: asSource(boardObj),
+      series: asIndexSeries(boardObj.series),
+      seriesStatus: asStatus(boardObj.series_status),
     },
     watchlist: {
       status: watch.status,
@@ -269,6 +415,8 @@ export function parseQuickReport(v: unknown): QuickReport | null {
           market_cap: asNum(r.market_cap),
           remark: asStr(r.remark),
         })),
+      source: asSource(watchObj),
+      stats: asWatchStats(watchObj.stats),
     },
     announce: {
       status: ann.status,
@@ -283,6 +431,7 @@ export function parseQuickReport(v: unknown): QuickReport | null {
           title: asStr(r.title),
           ann_date: asStr(r.ann_date),
         })),
+      source: asSource(annObj),
     },
     forecast: {
       status: fc.status,
@@ -303,6 +452,7 @@ export function parseQuickReport(v: unknown): QuickReport | null {
           hits: asStrList(r.hits),
           reason: asStr(r.reason),
         })),
+      source: asSource(fcObj),
     },
     news: {
       status: news.status,
@@ -315,6 +465,8 @@ export function parseQuickReport(v: unknown): QuickReport | null {
           datetime: asStr(r.datetime),
           url: asStr(r.url),
         })),
+      source: asSource(newsObj),
+      attempts: asAttempts(newsObj.attempts),
     },
     brief: {
       text: (v.brief as Record<string, unknown>).text as string,

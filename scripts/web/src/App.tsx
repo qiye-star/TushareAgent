@@ -177,7 +177,7 @@ export default function App() {
             <>
               <TopBar
                 title="AI算力产业链 · 高频跟踪快报"
-                status="idle"
+                status={quickReport.generating ? 'streaming' : quickReport.error ? 'error' : 'idle'}
                 theme={theme}
                 onToggleTheme={toggleTheme}
                 onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
@@ -190,9 +190,16 @@ export default function App() {
                 loading={quickReport.loading}
                 generating={quickReport.generating}
                 error={quickReport.error}
+                status={quickReport.status}
+                freshness={quickReport.freshness}
+                hasNewerReport={quickReport.hasNewerReport}
+                // 复用 App 层已加载的 useMcpSources（设置页用的那份），零额外请求。
+                // 关联出的「该段 na 是因为源被关掉了」是这块看板最高价值的产出。
+                mcpSources={mcpSources.sources}
                 onRefresh={() => void quickReport.refresh()}
                 onRegenerate={() => void quickReport.regenerate()}
                 onBackToLatest={() => void quickReport.refresh()}
+                onGoToSettings={() => setView('settings')}
               />
             </>
           ) : view === 'skills' ? (

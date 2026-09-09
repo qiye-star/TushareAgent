@@ -25,6 +25,12 @@ export default defineConfig({
           react: ['react', 'react-dom'],
           markdown: ['react-markdown', 'remark-gfm'],
           icons: ['@phosphor-icons/react'],
+          // ECharts 只在快报页用到 → 单独成块 + 由 components/charts/EChart 走 React.lazy 动态导入，
+          // 只在打开快报页时才拉（已验证 index.html 不 modulepreload 它、入口块也不静态 import 它）。
+          // 四个子路径都列上，别只写 'echarts/core'——那样 charts/components/renderers 会漏进入口块。
+          // 实测 538KB raw / 180KB gzip：这就是 core + Line/Bar + Grid/Tooltip/Legend/DataZoom/MarkLine
+          // + CanvasRenderer + zrender 的真实体积（tree-shaking 是生效的，换函数式归块产物逐字节相同）。
+          echarts: ['echarts/core', 'echarts/charts', 'echarts/components', 'echarts/renderers'],
           radix: [
             '@radix-ui/react-dialog',
             '@radix-ui/react-dropdown-menu',

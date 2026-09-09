@@ -36,6 +36,160 @@
     0 8px 24px -12px rgb(37 99 235 / 0.12);
 }
 
+@layer base {
+  /*
+   * 图表调色板：**不能**用 --color-zinc-N 或 --color-primary-N 这类 @theme 变量代替——
+   *（注：正文里别写 `-*` 紧跟 `/` 的通配形式，那会提前闭合 CSS 注释）
+   * Tailwind v4 会裁剪未被任何工具类引用的 theme 变量（实测 dist CSS 只输出了用到的那些），
+   * 且 Tailwind 的颜色变量在 .dark 下不变（dark: 变体是另写一条规则读同一个变量，
+   * 图表要在 JS 里 getComputedStyle 读值，没有「暗色版」可读）。所以在这里手写一套，
+   * :root + .dark 各一份，交给 hooks/useChartTokens.ts 在运行时读取。
+   * 序列色全部是 primary-* 的明度阶梯 + 一个中性灰，不引入新色相（Color Consistency Lock）。
+   */
+  :root {
+    --rt-chart-up: #e11d48; /* rose-600 —— A股惯例：涨=红 */
+    --rt-chart-down: #059669; /* emerald-600 —— 跌=绿 */
+    --rt-chart-flat: #71717a; /* zinc-500 */
+    --rt-chart-axis: #d4d4d8; /* zinc-300 */
+    --rt-chart-split: #f1f1f3;
+    --rt-chart-text: #52525b; /* zinc-600 */
+    --rt-chart-dim: #a1a1aa; /* zinc-400 */
+    --rt-chart-tip-bg: #ffffff;
+    --rt-chart-tip-border: #e4e4e7;
+    --rt-chart-tip-text: #27272a;
+    --rt-chart-s1: #2563eb; /* primary-600 */
+    --rt-chart-s2: #60a5fa; /* primary-400 */
+    --rt-chart-s3: #1e40af; /* primary-800 */
+    --rt-chart-s4: #93c5fd; /* primary-300 */
+    --rt-chart-s5: #a1a1aa; /* zinc-400 */
+  }
+  .dark {
+    --rt-chart-up: #fb7185; /* rose-400 */
+    --rt-chart-down: #34d399; /* emerald-400 */
+    --rt-chart-flat: #a1a1aa;
+    --rt-chart-axis: #3f3f46; /* zinc-700 */
+    --rt-chart-split: #27272a;
+    --rt-chart-text: #a1a1aa;
+    --rt-chart-dim: #71717a;
+    --rt-chart-tip-bg: #18181b;
+    --rt-chart-tip-border: #3f3f46;
+    --rt-chart-tip-text: #e4e4e7;
+    --rt-chart-s1: #60a5fa;
+    --rt-chart-s2: #93c5fd;
+    --rt-chart-s3: #2563eb;
+    --rt-chart-s4: #bfdbfe;
+    --rt-chart-s5: #71717a;
+  }
+}
+
+@layer components {
+  /*
+   * 快报仪表盘的局部密度/形状域——挂在快报视图根节点上，只影响这一棵子树。
+   * 不放进 @theme：那是全局的，会波及对话/技能/设置页。这里靠「继承的 font-size +
+   * 子树内重定义 CSS 变量」把密度局部化，且复用 Tailwind v4 的既有机制：
+   * rounded-card 编译成 border-radius: var(--radius-card)，子树内重定义该变量
+   * 即可把 12px 圆角收成参考稿的 7px，不需要改任何 className。
+   * 约定：新面板一律用 rounded-card / rounded-control，禁用 rounded-xl / rounded-lg
+   *（那两个读 --radius-xl / --radius-lg，重定义会误伤全站）；字重只用 400 / 700。
+   */
+  .report-dense {
+    font-size: 13px;
+    line-height: 1.45;
+    font-weight: 400;
+
+    --radius-card: 0.4375rem; /* 7px，比全站默认的 12px 更硬朗 */
+    --radius-control: 0.3125rem; /* 5px */
+
+    --rt-ground: #fcfcfd;
+    --rt-card: rgb(250 250 247 / 0.76);
+    --rt-card-solid: #fdfdfb;
+    --rt-ink: #151514;
+    --rt-line: #e8e8e4;
+    --rt-line-soft: #f1f1ee;
+    --rt-muted: #6b6b66;
+
+    background: var(--rt-ground);
+    color: var(--rt-ink);
+  }
+  .dark .report-dense {
+    /* 深色下回到 zinc 中性——暖调在深色里会发黄，不能直接反转 */
+    --rt-ground: #09090b;
+    --rt-card: rgb(24 24 27 / 0.72);
+    --rt-card-solid: #18181b;
+    --rt-ink: #f4f4f5;
+    --rt-line: #27272a;
+    --rt-line-soft: #1f1f22;
+    --rt-muted: #a1a1aa;
+  }
+
+  .report-dense :is(b, strong, .rt-b) {
+    font-weight: 700;
+  }
+
+  /* 字号阶梯：display/metric/lede/body/micro/label，不再散落 text-[12.5px] */
+  .report-dense .rt-display {
+    font-size: 30px;
+    line-height: 1;
+    font-weight: 700;
+    letter-spacing: -0.025em;
+    font-variant-numeric: tabular-nums;
+  }
+  .report-dense .rt-metric {
+    font-size: 21px;
+    line-height: 1.1;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+  }
+  .report-dense .rt-lede {
+    font-size: 15px;
+    line-height: 1.55;
+  }
+  .report-dense .rt-body {
+    font-size: 13px;
+  }
+  .report-dense .rt-micro {
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--rt-muted);
+  }
+  .report-dense .rt-label {
+    font-size: 10.5px;
+    line-height: 1.2;
+    font-weight: 400;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--rt-muted);
+  }
+  .report-dense .rt-num {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+  }
+
+  .report-dense .rt-card {
+    border: 1px solid var(--rt-line);
+    border-radius: var(--radius-card);
+    background: var(--rt-card);
+    padding: 0.625rem 0.75rem;
+  }
+  .report-dense .rt-card-flush {
+    padding: 0;
+  }
+
+  .report-dense table {
+    font-size: 12px;
+  }
+  .report-dense thead th {
+    padding-top: 0.3125rem;
+    padding-bottom: 0.3125rem;
+  }
+  .report-dense tbody td {
+    padding-top: 0.25rem;
+    padding-bottom: 0.25rem;
+  }
+}
+
 @layer components {
   /* 答案表格：表头强调 + 列分隔 + 斑马纹 + 行悬停（卡片式圆角/横滚容器在 AnswerBlock 内） */
   .answer-table {

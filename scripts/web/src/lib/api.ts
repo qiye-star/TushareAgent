@@ -1,5 +1,6 @@
 import type { SessionMessage, SessionMeta, TurnBlob } from './types'
 import { parseQuickReport, type QuickReport } from './quickReport'
+import { parseQuickReportStatus, type QuickReportStatus } from './quickReportStatus'
 import type { McpSource, McpSourcesResponse, McpStatus } from './mcp'
 import {
   parseSkillDetail,
@@ -80,6 +81,17 @@ export async function getQuickReportByDate(day: string): Promise<QuickReport | n
   if (res.status === 404) return null
   if (!res.ok) throw new Error(`无法获取快报 (${res.status})`)
   return parseQuickReport(await res.json())
+}
+
+/**
+ * 快报健康状态：纯读，不触发任何 MCP 连接，可放心轮询。
+ * 404（后端还没部署这个端点）与形状不符都返回 null——调用方（useQuickReport）据此退化为
+ * 只用 history 列表检测新报文，不阻断其它功能，让整套重构能在后端更新前就先上线。
+ */
+export async function getQuickReportStatus(): Promise<QuickReportStatus | null> {
+  const res = await fetch('/api/quickreport/status')
+  if (!res.ok) return null
+  return parseQuickReportStatus(await res.json())
 }
 
 export interface QuickReportHistoryItem {
