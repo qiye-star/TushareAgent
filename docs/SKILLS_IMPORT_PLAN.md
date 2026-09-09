@@ -211,6 +211,33 @@ tests/test_agent_loop.py                 # 改：SKILLS 断言；新增 forced_s
 
 ---
 
+## 4.5 实施结果（2026-09-08 已落地）
+
+| 项 | 结果 |
+|---|---|
+| 语料 | `demomcp/skill_library/claude-for/` 63 个 `SKILL.md`（584KB，upstream `59e97ee`）+ 库内 README |
+| 后端 | `graph/skill_loader.py`（解析/分段/对照/标注/纪律/去重）、`graph/skill_catalog.py`（63 条中文短描述 + 6 个域标签）、`config/skill_toggle.py`（按技能开关）、`graph/skills.py`（`SKILLS` = 1 + 63 = **64**）、`state/nodes/agent` 的 `forced_skill` 链路、`web.py` 三端点 + `ChatRequest.skill` |
+| 前端 | Sidebar 第三视图「技能」、`components/skills/{SkillsView,SkillCard,SkillDetail}`、`hooks/useSkills`、`lib/skills.ts`、Composer 技能芯片、ThinkingTrace「命中技能：xxx」 |
+| 测试 | `tests/test_skill_loader.py`（22 例）+ `tests/test_skill_api.py`（9 例）→ 全量 **437 passed / 3 skipped**；`ruff` 干净；`npm run build`（含 `tsc --noEmit`）通过 |
+| router 清单 | **4,424 字符**（原始 description 会是 20.7KB） |
+| 度量 | `tool_hint` 均 2,419 / max 3,033 字符；能力降级命中 **7** 条；`should_rag` **16** 条 |
+
+### 实测发现并修掉的 4 个缺陷（都不在原方案预料内）
+
+1. **`WIND_API_KEY` 被当成工具名**：大小写不敏感扫描把环境变量翻成 `wind_query(api_name="api_key")` —— 不存在的接口，会直接教坏 LLM。改为**区分大小写** + `_NOT_TOOLS` 兜底 + 排掉结尾 `_` 的通配写法。
+2. **`tool_families` 不能只看工具名**：修掉 ① 后只剩 1 篇点名 `wind_*`、6 篇点名 `ifind_*`，而 `ifind_*` 元工具**不在** `META_TOOL_NAMES` 里 → iFind 整条路进不了工具面。拆成 `detect_source_families()`（按正文走哪家源，散文也算，→ 59/61 篇）与 `tool_mapping`（只翻真实工具名）两件事。
+3. **数据源 Badge 措辞失真**：58/63 提 iFind、29/63 提 Wind → 「需同花顺」出现在 92% 的卡片上，既是噪声又暗示「关掉该源就不能用」。改成中性标签「万得/同花顺」+ tooltip 说明会优先走官方等价接口。
+4. **详情页折叠区被裁成两行**：`Collapsible` 的 `grid-rows-[0fr→1fr]` 动画在滚动容器里把 `1fr` 解析成「可用空间」而非内容高度 → 改直接条件渲染。
+
+### 真实链路实测（8010 + 网关五源 264 工具 + DeepSeek）
+
+- **「快速使用」→ 强制 `china-dcf`**：intent=report / skill=china-dcf / strategy=factual；9 轮取数 15 条证据，工具序列 `get_quote,get_financials×3` → `stock_basic,daily_basic` → `wind_list_apis,ifind_list_apis` → `ifind_get_api_info` → `ifind_query×5`（含 **中国10年期国债收益率 1.676%**、**FCFF −708.53 亿**、**Beta(24M) −0.7786**）。输出严格按 DCF 骨架，取不到的年度行写『数据未接入』，Beta 异常被识别并**拒绝采用**、改用假设区间并显式披露，目标价按纪律写『暂无可靠目标价』。
+- **自然语言自动命中**：「帮我写一份宁德时代（300750）的业绩点评报告」→ router 从 63 行短清单命中 `china-earnings-analysis`（8 轮 13 证据，工具含 `get_financials`/`get_stock_news`/`ifind_query`/`get_historical_data`）。
+- **强制文件产物型 `china-xlsx-author`**：strategy=auto（不在 RAG 名单），首轮直接取 `stock_basic,income,balancesheet,cashflow,fina_indicator`——正是对照段给的 Tushare 官方等价接口。
+- **DCF 那轮暴露的 3 处提示词越界**（已收紧 `LIBRARY_DISCIPLINE` 并加回归断言）：①结尾凭空落款「数据来源于万得 Wind」——那轮**根本没用 Wind 数据**；②正文写「技能说明中 2.5%-3.5% 的常规区间」泄漏提示词内部结构；③给出「增持」这类卖方评级标签（纪律只允许方向性判断）。
+
+---
+
 ## 5. 实施步骤
 
 ### Phase 1 —— 语料 + loader（不接线）

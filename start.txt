@@ -1,0 +1,8 @@
+# 启动项目：两个独立进程（在项目根目录 E:\TushareAgent 下运行）
+# 先启动 MCP 网关(8766)，再启动 Web 服务(8010) —— 顺序不强制，可各开一个终端
+
+# Web 服务（前端对话，:8010）
+uv run uvicorn demomcp.entry.web:app --port 8010
+
+# MCP 网关（取数入口，:8766）
+uv run uvicorn mcp_gateway.app:app --port 8766

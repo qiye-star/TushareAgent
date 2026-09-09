@@ -13,6 +13,7 @@ data/quickreport/last_error.json
 data/quickreport/history/
 # MCP 全局开关运行态（demomcp 侧）+ 网关按源开关/运行态（mcp_gateway 侧）——都是运行时状态，不是配置模板
 data/settings/mcp_toggle.json
+data/settings/skills.json
 mcp_gateway/data/
 .env
 .venv/

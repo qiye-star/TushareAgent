@@ -20,6 +20,25 @@ from sqlalchemy.ext.asyncio import (
 from demomcp.db.models import Base, ChatMessage, ChatTurn, ChatTurnData
 
 
+def _sanitize_turn_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """丢弃 content 与 tool_calls 双空的 assistant 帧。
+
+    2026-09-08 线上事故：synthesizer 输出为空（思考吃光 max_tokens）时该帧被存进历史
+    （content=null），DeepSeek API 下一轮直接 400（Invalid assistant message: content or
+    tool_calls must be set），同一会话所有后续提问全部失败。恢复时清洗让既有坏会话自愈；
+    新写入已由 graph/nodes.py 的 `_append_assistant_frame` 从源头拦掉。
+    """
+    return [
+        m
+        for m in messages
+        if not (
+            m.get("role") == "assistant"
+            and not m.get("content")
+            and not m.get("tool_calls")
+        )
+    ]
+
+
 class ChatHistoryStore:
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
@@ -73,7 +92,7 @@ class ChatHistoryStore:
             row = (await session.execute(stmt)).scalars().first()
         if row is None:
             return None
-        return json.loads(row.messages)
+        return _sanitize_turn_messages(json.loads(row.messages))
 
     async def load(self, session_id: str, *, limit: int = 500) -> list[dict[str, Any]]:
         """该会话逐条可读消息（含 is_error / created_at）。"""

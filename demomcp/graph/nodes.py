@@ -392,7 +392,7 @@ def make_tool_rag(
             }
         usage = _merge_usage(usage, resp.usage)
 
-        messages.append(llm.assistant_message(resp))
+        _append_assistant_frame(messages, llm, resp)
 
         # —— 无工具：LLM 判定「数据已足够」（停止轮）。基于**累积**证据判定，不只看本轮。 ——
         if not resp.tool_uses:
@@ -624,6 +624,20 @@ def _truncate_json_raw(content: str, limit: int = _MAX_SOURCE_RAW) -> str:
 
 
 
+def _append_assistant_frame(messages: list[dict[str, Any]], llm: Any, resp: Any) -> None:
+    """追加 assistant 轮消息；content 与 tool_calls 双空时不追加。
+
+    线上事故（2026-09-08）：synthesizer 输出被 max_tokens 截断为空时，`assistant_message` 渲染出
+    `{"role": "assistant", "content": None, "reasoning_content": …}`——DeepSeek API 要求 assistant
+    消息必须带 content 或 tool_calls，空帧写进历史后同一会话的下一轮直接 400（Invalid assistant
+    message），整个会话报废。带 tool_calls 的帧（content 可空）是合法载荷，保留。
+    """
+
+    frame = llm.assistant_message(resp)
+    if frame.get("content") or frame.get("tool_calls"):
+        messages.append(frame)
+
+
 def make_synthesizer(llm: Any, *, max_tokens: int, disclaimer: str, base_system: str,
                      skills: list[Skill] | None = None):
     """投研生成与格式化：依据证据摘要总结，标注来源，并附免责声明；skill 命中时用该 skill 的系统提示词。"""
@@ -701,31 +715,46 @@ def make_synthesizer(llm: Any, *, max_tokens: int, disclaimer: str, base_system:
                 "usage": state.get("usage"),
                 "structured": _structured(answer, intent, strategy, evidence, pending, skill_id),
             }
-        answer = (resp.text or "").strip() or "已取到数据，但未能生成总结。"
-        if _is_degenerate_answer(answer):
-            # 疑似拒答/空话（曾在线上出现：证据充分却只回"抱歉，我无法完成这个请求。"）：重试一次，
-            # 且不接 on_text——避免刚才那句拒答已经流给前端后，重试的字符又叠上去、越看越乱。
+        answer = (resp.text or "").strip()
+        if _is_degenerate_answer(answer) or resp.stop_reason == "max_tokens":
+            # 三类失败都不可作为答案下发：拒答/空话（线上曾出现：证据充分却只回"抱歉，我无法完成这个请求。"）；
+            # 空文本与截断（2026-09-08 线上事故：v4-flash 的思考也计入 max_tokens，ds_max_tokens=8192
+            # 的预算被 reasoning 吃光——实测 reasoning_tokens=8190→content 为空；正文写到一半被截断同理）。
+            # 统一重试一次并**加倍预算**（截断原因没变的话同预算必再截断）；
+            # 不接 on_text——避免刚才那段文字已经流给前端后，重试的字符又叠上去、越看越乱。
+            if not answer or resp.stop_reason == "max_tokens":
+                _log.warning(
+                    "synthesizer 输出为空/截断（stop=%s, completion_tokens=%s），重试",
+                    resp.stop_reason,
+                    (resp.usage or {}).get("completion_tokens"),
+                )
             try:
                 retry_resp = await llm.chat(
                     messages=[{"role": "user", "content": user_msg + "\n\n可用数据：\n" + evidence_digest}],
                     tools=[],
                     system=system_prompt,
-                    max_tokens=max_tokens,
+                    max_tokens=max(max_tokens * 2, 16384),
                     stream=True,
                     temperature=0.0,
                     on_text=None,
                     on_thinking=None,
                 )
                 retry_answer = (retry_resp.text or "").strip()
-            except Exception as exc:  # noqa: BLE001 - 重试异常按"仍然拒答"处理，走下面的诚实兜底
+            except Exception as exc:  # noqa: BLE001 - 重试异常按"仍然失败"处理，走下面的诚实兜底
                 _log.warning("synthesizer retry llm.chat failed: %s: %s", type(exc).__name__, exc)
                 retry_resp, retry_answer = None, ""
-            if retry_answer and not _is_degenerate_answer(retry_answer):
+            if (
+                retry_answer
+                and not _is_degenerate_answer(retry_answer)
+                and retry_resp is not None
+                and retry_resp.stop_reason != "max_tokens"
+            ):
                 resp, answer = retry_resp, retry_answer
             else:
-                # 重试仍拒答：不再包装成"成功"。不拼万得来源声明——没有真实总结内容时标来源反而误导，
-                # 正是这次事故的样子；disclaimer 仍保留（通用声明，不误导）。sources/citations 不清空：
-                # 证据是真实取到的，取数本身没失败，只是文字总结失败，用户仍应能在引用来源里核对。
+                # 重试仍失败（拒答/空/再截断）：不再包装成"成功"。不拼万得来源声明——没有真实总结内容时
+                # 标来源反而误导，正是这次事故的样子；disclaimer 仍保留（通用声明，不误导）。
+                # sources/citations 不清空：证据是真实取到的，取数本身没失败，只是文字总结失败，
+                # 用户仍应能在引用来源里核对。
                 answer = (
                     f"已取到 {len(evidence)} 条数据（可在下方「查看引用来源」中核对），"
                     "但未能生成可靠的文字总结，请尝试换个问法或缩小问题范围后重新提问。"
@@ -754,10 +783,12 @@ def make_synthesizer(llm: Any, *, max_tokens: int, disclaimer: str, base_system:
                 answer = f"{answer}\n\n{attribution}"
                 if on_text:
                     await on_text(f"\n\n{attribution}")
+        next_messages = list(state.get("messages") or [])
+        _append_assistant_frame(next_messages, llm, resp)
         return {
             "final_answer": answer,
             "citations": citations,
-            "messages": list(state.get("messages") or []) + [llm.assistant_message(resp)],
+            "messages": next_messages,
             "stopped_reason": "end_turn",
             "usage": resp.usage or state.get("usage"),
             "structured": _structured(answer, intent, strategy, evidence, pending, skill_id),

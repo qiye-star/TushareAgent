@@ -75,6 +75,64 @@ async def test_synthesizer_falls_back_without_evidence_wording() -> None:
     assert "已取到" not in out["structured"]["answer"]  # 无证据时不提"已取到 0 条数据"这种怪话
 
 
+async def test_synthesizer_empty_persists_honest_fallback() -> None:
+    """重试仍被截断（API 上限/思考依旧吃光预算）→ 诚实兜底，不假成功、不标万得来源。"""
+    mock = MockLLM([
+        ChatResponse(stop_reason="max_tokens", text=""),
+        ChatResponse(stop_reason="max_tokens", text=""),
+    ])
+    synthesizer = make_synthesizer(mock, max_tokens=2048, disclaimer=DISCLAIMER, base_system="系统提示")
+    out = await synthesizer(_state(WIND_EVIDENCE), config={"configurable": {}})
+
+    assert len(mock.calls) == 2
+    assert out["stopped_reason"] == "fallback"
+    answer = out["structured"]["answer"]
+    assert "已取到 1 条数据" in answer
+    assert DISCLAIMER in answer
+    assert "数据来源于万得" not in answer
+    assert out["structured"]["sources"]  # 证据不清空：取数本身成功，只是文字总结失败
+
+
+async def test_synthesizer_retries_on_empty_text_then_succeeds() -> None:
+    """思考吃光 max_tokens（content 为空，2026-09-08 线上事故形态）→ 与拒答同路重试，预算翻倍。"""
+    mock = MockLLM([
+        ChatResponse(stop_reason="max_tokens", text="", usage={"completion_tokens": 8190}),
+        ChatResponse(stop_reason="end_turn", text="寒武纪 2026 中报营收 59.96 亿元，同比增长约 411%。"),
+    ])
+    synthesizer = make_synthesizer(mock, max_tokens=2048, disclaimer=DISCLAIMER, base_system="系统提示")
+    out = await synthesizer(_state(WIND_EVIDENCE), config={"configurable": {}})
+
+    assert len(mock.calls) == 2
+    assert mock.calls[1]["max_tokens"] == 16384  # 翻倍（截断原因没变的话同预算必再截断）
+    assert out["stopped_reason"] == "end_turn"
+    assert "寒武纪 2026 中报营收 59.96 亿元" in out["structured"]["answer"]
+    assert DISCLAIMER in out["structured"]["answer"]
+    assert "数据来源于万得 Wind 金融数据服务。" in out["structured"]["answer"]
+    # 空帧不得写入历史（否则同会话下一轮 API 400）
+    assert not any(
+        m.get("role") == "assistant" and not m.get("content") and not m.get("tool_calls")
+        for m in out["messages"]
+    )
+
+
+async def test_synthesizer_retries_on_truncated_answer() -> None:
+    """正文写到一半被 max_tokens 截断（文本非空）→ 同样重试，不下发半截报告。"""
+    mock = MockLLM([
+        ChatResponse(
+            stop_reason="max_tokens",
+            text="寒武纪 2026 年中报营收 59.96 亿元，同比大幅增长，盈利能力持续提升……",
+        ),
+        ChatResponse(stop_reason="end_turn", text="寒武纪 2026 年中报营收 59.96 亿元，同比增长 411%。"),
+    ])
+    synthesizer = make_synthesizer(mock, max_tokens=2048, disclaimer=DISCLAIMER, base_system="系统提示")
+    out = await synthesizer(_state(WIND_EVIDENCE), config={"configurable": {}})
+
+    assert len(mock.calls) == 2
+    assert out["stopped_reason"] == "end_turn"
+    assert "同比增长 411%" in out["structured"]["answer"]
+    assert "……" not in out["structured"]["answer"]
+
+
 def test_is_degenerate_answer_matches_known_refusal() -> None:
     assert _is_degenerate_answer("抱歉，我无法完成这个请求。") is True
     assert _is_degenerate_answer("很抱歉，我无法完成这个请求。") is True

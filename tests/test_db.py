@@ -66,6 +66,28 @@ async def test_last_turn_messages_empty(store) -> None:
     assert await store.last_turn_messages("none") is None
 
 
+async def test_last_turn_messages_drops_empty_assistant_frames(store) -> None:
+    """恢复时清洗 content/tool_calls 双空的 assistant 帧（线上事故：空总结帧历史导致下一轮 API 400）。"""
+    await store.append_turn(
+        "s1",
+        [
+            {"role": "user", "content": "分析寒武纪"},
+            {"role": "assistant", "content": None, "reasoning_content": "思考了 13542 字符"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "x", "arguments": "{}"}}]},
+            {"role": "user", "content": "继续"},
+        ],
+    )
+    latest = await store.last_turn_messages("s1")
+    # 双空帧被丢弃；带 tool_calls 的帧（content 可空，合法）保留
+    assert latest == [
+        {"role": "user", "content": "分析寒武纪"},
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "x", "arguments": "{}"}}]},
+        {"role": "user", "content": "继续"},
+    ]
+
+
 async def test_list_sessions_meta(store) -> None:
     await store.append("s1", "user", "a")
     await store.append("s1", "assistant", "b")

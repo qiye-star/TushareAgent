@@ -26,7 +26,13 @@ class MockLLM:
         on_thinking: OnThinking | None = None,
     ) -> ChatResponse:
         self.calls.append(
-            {"messages": messages, "tools": tools, "system": system, "temperature": temperature}
+            {
+                "messages": messages,
+                "tools": tools,
+                "system": system,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
         )
         resp = self._responses.pop(0)
         if on_text and resp.text:
