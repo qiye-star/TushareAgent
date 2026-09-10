@@ -20,7 +20,7 @@ class _FakeAgent:
 
     instances: ClassVar[list[_FakeAgent]] = []
 
-    def __init__(self, *, llm, tools, config) -> None:
+    def __init__(self, *, llm, tools, config, synth_llm=None) -> None:
         self.tools = tools
         _FakeAgent.instances.append(self)
 

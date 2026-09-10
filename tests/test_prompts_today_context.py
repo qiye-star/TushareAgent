@@ -59,7 +59,6 @@ async def test_agent_run_passes_today_context_to_every_llm_call(make_settings) -
     mock = MockLLM(
         [
             ChatResponse(stop_reason="end_turn", text='{"intent":"market","out_of_scope":false}'),
-            ChatResponse(stop_reason="end_turn", text="比亚迪 最近价格 区间"),  # rewrite_query
             ChatResponse(
                 stop_reason="tool_use",
                 tool_uses=[ToolUse(id="c1", name="stock_price_range", input={"name": "比亚迪"})],
@@ -72,7 +71,7 @@ async def test_agent_run_passes_today_context_to_every_llm_call(make_settings) -
     result = await agent.run("比亚迪最近价格")
 
     assert result.stopped_reason == "end_turn"
-    assert len(mock.calls) == 5  # router / rewrite_query / tool选择 / 停止判定 / synthesizer
+    assert len(mock.calls) == 4  # router / tool选择 / 停止判定 / synthesizer（market 意图跳过 rewrite_query）
     today = _today_iso()
     for i, call in enumerate(mock.calls):
         assert call["system"] is not None, f"第 {i + 1} 次调用未传 system"

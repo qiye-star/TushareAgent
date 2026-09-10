@@ -91,8 +91,13 @@ def _flatten_exceptions(err: BaseException) -> list[BaseException]:
 
 
 class Agent:
-    def __init__(self, *, llm: LLMClient, tools: ToolProvider, config: Settings) -> None:
+    def __init__(
+        self, *, llm: LLMClient, tools: ToolProvider, config: Settings, synth_llm: LLMClient | None = None
+    ) -> None:
         self._llm = llm
+        # 深度思考（reasoner）只喂给最终 synthesizer：router/rewrite_query/tool_rag 选工具三步用 llm（快模型）。
+        # 不传 synth_llm 时回退等于 llm，对不需要区分两个模型的调用方（cli.py 等）完全向后兼容。
+        self._synth_llm = synth_llm or llm
         self._tools = tools
         self._config = config
         self._tool_defs: list[Any] | None = None
@@ -160,11 +165,12 @@ class Agent:
             meta = META_TOOL_NAMES if cfg.tool_meta_always else frozenset()
 
             def curate(
-                specs: list[Any], query: str, *, skill_tools: frozenset[str] = frozenset()
+                specs: list[Any], query: str, *, skill_tools: frozenset[str] = frozenset(),
+                intent: str | None = None,
             ) -> list[Any]:
                 return select_tools(
                     specs, query, max_revealed=cfg.tool_max_revealed, meta=meta,
-                    catalog=self._tool_catalog, skill_tools=skill_tools,
+                    catalog=self._tool_catalog, skill_tools=skill_tools, intent=intent,
                 )
 
             system = base_system_for(cfg, tool_defs)  # 各源用法约定按本轮实际暴露的工具决定
@@ -190,6 +196,8 @@ class Agent:
                 skills=skills,
                 curate=curate,
                 max_iterations=max_iterations,
+                tool_call_timeout=cfg.tool_call_timeout,
+                synth_llm=self._synth_llm,
             )
         return self._graphs[mode]
 

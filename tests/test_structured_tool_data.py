@@ -81,7 +81,6 @@ async def test_graph_evidence_keeps_both_truncations(make_settings) -> None:
     tools = FakeToolProvider(SPECS, {"stock_price_range": ToolResult(content=payload, is_error=False)})
     mock = MockLLM([
         ChatResponse(stop_reason="end_turn", text='{"intent":"market","out_of_scope":false}'),
-        ChatResponse(stop_reason="end_turn", text="寒武纪 营业收入"),
         ChatResponse(
             stop_reason="tool_use",
             tool_uses=[ToolUse(id="c1", name="stock_price_range", input={"name": "寒武纪"})],

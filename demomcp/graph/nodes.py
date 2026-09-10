@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import copy
 import json
 from datetime import UTC, datetime
 from typing import Any
@@ -61,9 +63,15 @@ async def _emit_process(config: RunnableConfig, kind: str, data: dict[str, Any])
         await cb(kind, data)
 
 
-async def _safe_call_tool(tools: Any, name: str, arguments: dict[str, Any] | None) -> ToolResult:
+async def _safe_call_tool(
+    tools: Any, name: str, arguments: dict[str, Any] | None, *, timeout: float | None = None
+) -> ToolResult:
     try:
+        if timeout is not None:
+            return await asyncio.wait_for(tools.call_tool(name, arguments), timeout=timeout)
         return await tools.call_tool(name, arguments)
+    except TimeoutError:  # 护栏超时：单个慢/挂死工具不拖住整轮 gather，转 is_error 让其它结果按时汇总
+        return ToolResult(content=f"Error calling {name}: timed out after {timeout:.0f}s", is_error=True)
     except Exception as exc:  # noqa: BLE001 - 工具层吞掉一切，转 is_error 保图不崩
         return ToolResult(content=f"Error calling {name}: {exc}", is_error=True)
 
@@ -267,17 +275,24 @@ def _deterministic_rewrite(q: str) -> str:
         return q
 
 
-def make_rewrite_query(llm: Any | None = None, *, max_tokens: int = 256):
+def make_rewrite_query(llm: Any | None = None, *, max_tokens: int = 256, skills: list[Skill] | None = None):
     """查询改写节点：LLM 语义改写（更高质、契今年报措辞），供 dense/BM25 检索用。
 
     llm 为空或调用失败时回退确定性改写（_deterministic_rewrite），图永不崩；
     stream=False + temperature=0 求稳定；改写结果经 on_process("rewrite") 透传前端。
+
+    改写结果的唯一消费者是 `_rag_retrieve`（`tool_rag` 里按 `_should_rag` 判断本轮要不要 RAG）——
+    market 等不跑 RAG 的意图下改写结果从不会被用到，此时跳过 LLM 调用（该调用是非流式、阻塞式的，
+    发生在 tool_rag 之前，天然串行，跳过即省一次完整往返）。
     """
 
     async def rewrite_query(state: GraphState, config: RunnableConfig) -> dict[str, Any]:
         q = state.get("original_query", "") or ""
+        intent = state.get("intent")
+        skill = _resolve_skill(state.get("skill"), skills)
+        needs_llm = llm is not None and _should_rag(intent, skill)
         rewritten = ""
-        if llm is not None:
+        if needs_llm:
             try:
                 resp = await llm.chat(
                     messages=[{"role": "user", "content": q}],
@@ -293,7 +308,7 @@ def make_rewrite_query(llm: Any | None = None, *, max_tokens: int = 256):
                 rewritten = ""
         if not rewritten:
             rewritten = _deterministic_rewrite(q)
-        await _emit_process(config, "rewrite", {"original": q, "rewritten": rewritten})
+        await _emit_process(config, "rewrite", {"original": q, "rewritten": rewritten, "skipped": not needs_llm})
         return {"rewritten_query": rewritten}
 
     return rewrite_query
@@ -302,7 +317,7 @@ def make_rewrite_query(llm: Any | None = None, *, max_tokens: int = 256):
 def make_tool_rag(
     llm: Any, tools: Any, tool_defs: list, *, max_tokens: int, base_system: str, retriever: Any | None = None,
     skills: list[Skill] | None = None, curate: Any | None = None, max_iterations: int = 10,
-    no_progress_cap: int = 2,
+    no_progress_cap: int = 2, tool_call_timeout: float | None = 90.0,
 ):
     """工具执行与检索（agentic tool loop）：LLM 选工具 → 并行执行 + RAG → 归一化参数/校验 → 汇总证据。
 
@@ -322,6 +337,14 @@ def make_tool_rag(
         on_tool = _cf(config, "on_tool")
         intent = state.get("intent") or "market"
         skill = _resolve_skill(state.get("skill"), skills)
+        # 命中 skill 时，本轮取数按 report/compare 力度对待（REPORT_BASELINE_FAMILIES 恒揭示 + 清单式
+        # 取数引导）——不依赖 router 对裸词查询的粗粒度 intent 猜测。实测坑：forced_skill 场景下 router
+        # 看不到技能清单，对「寒武纪」这类裸标的词几乎总猜成 market；而 63 个 claude-for 导入技能各自的
+        # tool_families 用的是原环境工具名（get_financials/wind_/ifind_ 等），跟本部署 Tushare 官方接口名
+        # （income/balancesheet/cashflow…）对不上，若再叠加 intent=market 导致 REPORT_BASELINE_FAMILIES
+        # 不生效，模型会连 Tushare 财务接口都看不到——线上实测过：整份「业绩点评报告」查不到任何财务报表，
+        # 只能靠万得行情数据凑出估值速览，财报三张表全标「数据未接入」。
+        curation_intent = "report" if skill is not None else intent
 
         # 循环状态（读旧值累积，写回让 LangGraph 覆盖 state 键）
         loop_index = int(state.get("loop_index") or 0)
@@ -346,11 +369,17 @@ def make_tool_rag(
                 tool_defs,
                 state.get("original_query") or "",
                 skill_tools=frozenset(skill.tool_families) if skill else frozenset(),
+                intent=curation_intent,
             )
             if curate
             else tool_defs
         )
         do_rag = (retriever is not None) and _should_rag(intent, skill) and not rag_retrieved  # RAG 每轮只第一次
+        # RAG 的输入（原始/改写后查询、intent、skill）在选工具 LLM 调用之前就已就绪，与其选出的工具无关——
+        # 提前 create_task 让 RAG 检索（embed + 3 路本地检索 + rerank）与选工具 LLM 调用重叠，而不是叠在其后。
+        rag_task: asyncio.Task[tuple[list[dict[str, Any]], list[Any]]] | None = (
+            asyncio.create_task(_rag_retrieve(retriever, state, intent, skill, config)) if do_rag else None
+        )
         try:
             # 本节点只选工具/判断是否收尾，正常路径不产出最终答案（resp.text 不在本函数被读取）——
             # 任何流式 content 都按思考过程处理（on_text 接 on_thinking），不接答案通道；
@@ -361,7 +390,7 @@ def make_tool_rag(
             resp = await llm.chat(
                 messages=messages,
                 tools=revealed,
-                system=select_system(base_system, intent, skill.tool_hint if skill else "", round_no=round_no, max_iterations=max_iterations),
+                system=select_system(base_system, curation_intent, skill.tool_hint if skill else "", round_no=round_no, max_iterations=max_iterations),
                 max_tokens=max_tokens,
                 stream=True,
                 temperature=0.0,
@@ -370,7 +399,7 @@ def make_tool_rag(
             )
         except Exception as exc:  # noqa: BLE001 - LLM 选工具失败 → 仍先试 RAG；有累积证据则合成，否则 node_error
             _log.warning("tool_rag select-tools llm.chat failed (round=%d): %s: %s", round_no, type(exc).__name__, exc)
-            rag_evidence, raw_chunks = (await _rag_retrieve(retriever, state, intent, skill, config)) if do_rag else ([], [])
+            rag_evidence, raw_chunks = (await rag_task) if rag_task is not None else ([], [])
             if rag_evidence:
                 evidence.extend(rag_evidence)
             if raw_chunks:
@@ -390,13 +419,19 @@ def make_tool_rag(
                 "validation_errors": validation_errors,
                 "request_params": request_params,
             }
+        except BaseException:  # 含 asyncio.CancelledError：连带取消 rag_task，避免孤儿任务（客户端断连时）
+            if rag_task is not None:
+                rag_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await rag_task
+            raise
         usage = _merge_usage(usage, resp.usage)
 
         _append_assistant_frame(messages, llm, resp)
 
         # —— 无工具：LLM 判定「数据已足够」（停止轮）。基于**累积**证据判定，不只看本轮。 ——
         if not resp.tool_uses:
-            rag_evidence, raw_chunks = (await _rag_retrieve(retriever, state, intent, skill, config)) if do_rag else ([], [])
+            rag_evidence, raw_chunks = (await rag_task) if rag_task is not None else ([], [])
             if rag_evidence:
                 evidence.extend(rag_evidence)
             if raw_chunks:
@@ -431,12 +466,12 @@ def make_tool_rag(
                 "request_params": request_params,
             }
 
-        # —— 有工具：并行执行（RAG 本轮首次检索 + 全部工具调用），累积证据并回环让 LLM 再评估。 ——
+        # —— 有工具：并行执行（RAG 本轮首次检索——已在选工具 LLM 调用前起 task——+ 全部工具调用），
+        # 累积证据并回环让 LLM 再评估。 ——
         await _emit_process(config, "plan", {"tools": [tu.name for tu in resp.tool_uses], "round": round_no})
-        rag_coro = _rag_retrieve(retriever, state, intent, skill, config) if do_rag else _empty_rag()
-        tool_coros = [_safe_call_tool(tools, tu.name, tu.input) for tu in resp.tool_uses]
+        tool_coros = [_safe_call_tool(tools, tu.name, tu.input, timeout=tool_call_timeout) for tu in resp.tool_uses]
         try:
-            gathered = await asyncio.gather(rag_coro, *tool_coros)
+            gathered = await asyncio.gather(rag_task or _empty_rag(), *tool_coros)
         except Exception as exc:  # noqa: BLE001 - 并行一路（非取消）异常 → 有累积证据则合成，否则 parallel_race；取消仍透传
             _log.warning("tool_rag parallel gather failed (round=%d): %s: %s", round_no, type(exc).__name__, exc)
             return {
@@ -475,27 +510,32 @@ def make_tool_rag(
                     entry: dict[str, Any] = {
                         "source_type": "tool",
                         "source": tu.name,
-                        "content": _truncate_head_tail(content),
+                        "content": _evidence_content(content),
                         # raw 只供前端来源卡渲染表格；_evidence_digest 不读它 → 不占 LLM 上下文。
                         # 语义截断保证是有效 JSON（大表也能渲染成真表格），而非硬切在 JSON 中途。
                         "raw": _truncate_json_raw(content),
                     }
-                    params = parsed.get("source", {}).get("params") if isinstance(parsed.get("source"), dict) else None
-                    if isinstance(params, dict):
+                    # 工具调用的真实入参就是 tu.input——不用去挖返回体里的 source.params（那是已删除的
+                    # 旧语义层的信封形状，官方 Tushare/万得/iFind 的真实返回体里从来没有这个字段，导致
+                    # 这里一直取不到值：前端来源卡因此拿不到 ts_code 等参数区分同一轮的不同调用）。
+                    params = tu.input
+                    if params:
                         entry["params"] = params
                         request_params.update(params)
                     evidence.append(entry)
                 else:
                     validation_errors.append(_friendly_signal(parsed) or content)  # 友好校验失败，first-class
             elif content != "[]":
-                evidence.append(
-                    {
-                        "source_type": "tool",
-                        "source": tu.name,
-                        "content": _truncate_head_tail(content),
-                        "raw": _truncate_json_raw(content),
-                    }
-                )
+                entry = {
+                    "source_type": "tool",
+                    "source": tu.name,
+                    "content": _evidence_content(content),
+                    "raw": _truncate_json_raw(content),
+                }
+                if tu.input:
+                    entry["params"] = tu.input
+                    request_params.update(tu.input)
+                evidence.append(entry)
         if pairs:
             messages.extend(llm.tool_results_messages(pairs))
         await _emit_process(config, "params", {"request": request_params, "round": round_no})
@@ -550,13 +590,98 @@ def _friendly_signal(parsed: dict[str, Any]) -> str | None:
     return None
 
 
+def _row_slice_size(rows: list) -> int:
+    """紧凑 JSON 重排后的字节长度探针，供二分用（风格上与 _truncate_json_raw 的 probe_size 一致，
+    但这里是纯函数式的「切片再 dumps」而非「原地 mutate 再 dumps」——因为下面要做两次独立的二分
+    （先首后尾、且尾部二分只在「掐掉首段后剩下的行」里进行，天然不重叠），原地 mutate 的写法在
+    两段二分之间会互相污染，改用纯函数式更简单）。"""
+    return len(json.dumps(rows, ensure_ascii=False, separators=(",", ":")))
+
+
+def _bsearch_row_edge(rows: list, limit: int, *, from_end: bool) -> int:
+    """二分出 rows 从头（from_end=False）或从尾（from_end=True）取 n 行、重排为紧凑 JSON 后
+    仍 <= limit 的最大 n；0 表示连 1 行都放不下。"""
+    lo, hi, best = 1, len(rows), 0
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        probe = rows[-mid:] if from_end else rows[:mid]
+        if _row_slice_size(probe) <= limit:
+            best = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return best
+
+
+def _truncate_rows_head_tail(content: str, half: int) -> str | None:
+    """按「行」边界二分出首尾两段摘要（各不超过 half），供 _truncate_head_tail 在 JSON
+    行数据场景下复用；仅当 content 可解析为 JSON 且能靠 _data_container 定位到 >1 行的行容器时
+    才生效，否则返回 None 交给调用方回退到字符位置硬切（覆盖 _rag_retrieve 的散文场景/不可解析场景/
+    单行场景）。
+
+    先二分出最大首段 n1，再从**剩余行**（已去掉首段，保证零重叠）里二分出最大尾段 n2——
+    这是与 _truncate_json_raw（只保留头 n 行）的关键差异：那里够用是因为它只服务前端表格展示，
+    这里必须同时保住尾部，否则重演「daily 类接口降序、切头丢基期值」的线上事故
+    （见 _truncate_head_tail 的函数注释）。
+    """
+    try:
+        body = json.loads(content)
+    except (ValueError, TypeError):
+        return None
+    container = _data_container(body)
+    if container is None or len(container) <= 1:
+        return None
+
+    total = len(container)
+    head_n = _bsearch_row_edge(container, half, from_end=False)
+    remaining = container[head_n:]
+    tail_n = _bsearch_row_edge(remaining, half, from_end=True)
+    omitted = total - head_n - tail_n
+    tail_rows = remaining[len(remaining) - tail_n:] if tail_n else []
+
+    # 用原 body 的深拷贝分别承接首/尾行——保留信封形状（{"ok":..,"data":[...]}/
+    # {"data":{"rows":[...]}}），而不是只吐裸行数组；裸数组场景（_data_container 直接
+    # 返回 body 本身）下深拷贝出的 head_body/tail_body 就是行数组本身，行为等价。
+    head_body = copy.deepcopy(body)
+    head_container = _data_container(head_body)
+    head_container[:] = container[:head_n]
+    if isinstance(head_body, dict) and isinstance(head_body.get("row_count"), int):
+        head_body["row_count"] = head_n  # 与 _truncate_json_raw 一致：截断后同步 row_count
+    parts = [json.dumps(head_body, ensure_ascii=False, separators=(",", ":"))]
+
+    if omitted > 0:
+        parts.append(
+            f"……中间省略 {omitted} 行（数据已成功取回，仅因摘要长度限制未展示，并非未接入；"
+            "需要请缩小查询区间）……"
+        )
+    if tail_rows:
+        tail_body = copy.deepcopy(body)
+        tail_container = _data_container(tail_body)
+        tail_container[:] = tail_rows
+        if isinstance(tail_body, dict) and isinstance(tail_body.get("row_count"), int):
+            tail_body["row_count"] = tail_n
+        parts.append(json.dumps(tail_body, ensure_ascii=False, separators=(",", ":")))
+
+    return "\n\n".join(parts)
+
+
 def _truncate_head_tail(content: str, limit: int = _MAX_EVIDENCE_CHARS) -> str:
     """长内容保首尾、中段折叠：daily 类接口按 trade_date 降序，首尾恰是区间两端
     （起止交易日/基期日）。切头会让「全年涨跌幅」类计算缺基期值（线上事故：243 行 index_daily
-    截后只剩 2024-12 约 8 行，模型如实报「数据未接入」而无法计算）。摘要仍限 limit，只加一行省略标记。"""
+    截后只剩 2024-12 约 8 行，模型如实报「数据未接入」而无法计算）。摘要仍限 limit，只加一行省略标记。
+
+    2026-09-10 修复：原实现是纯字符位置切割，会切在 JSON 行对象中途（如把一条财务记录的
+    revenue 字段留在头段、n_income_attr_p 字段留在被丢弃的中段），导致模型看到「半条记录」
+    误判成「该字段未接入」而不是「该字段被摘要截断」。现在优先走按行边界切的
+    _truncate_rows_head_tail（可解析 JSON 且有 >1 行的行容器时），保证任何一行要么完整保留在
+    首/尾段、要么完整落入省略中段，绝不切穿单行；解析失败/无行容器/只有 0-1 行（如 RAG 的散文
+    chunk.text、单条记录）时回退到原字符位置切割。"""
     if len(content) <= limit:
         return content
     half = limit // 2
+    by_row = _truncate_rows_head_tail(content, half)
+    if by_row is not None:
+        return by_row
     return (
         f"{content[:half]}\n\n……中间省略约 {len(content) - limit} 字符（如需完整/尾部数据请缩小查询区间）……\n\n"
         f"{content[-half:]}"
@@ -622,6 +747,137 @@ def _truncate_json_raw(content: str, limit: int = _MAX_SOURCE_RAW) -> str:
         body["row_count"] = best  # 行数已截断，同步 row_count，避免表头与数据行不一致
     return json.dumps(body, ensure_ascii=False, separators=(",", ":"))
 
+
+_PERIOD_SUFFIX = {"0331": "Q1", "0630": "H1", "0930": "前三季度", "1231": "年报"}
+
+
+def _period_label(end_date: Any) -> str:
+    """Tushare 报告期 YYYYMMDD → 分析师口径标签：0331→Q1，0630→H1，0930→前三季度（三季度累计），
+    1231→年报（全年）。非标准/非字符串 end_date 原样转字符串返回，不臆测期次含义
+    ——原始 end_date 仍会在表格里紧邻展示做兜底，供人工核对。"""
+    if isinstance(end_date, str) and len(end_date) == 8 and end_date.isdigit():
+        suffix = _PERIOD_SUFFIX.get(end_date[4:])
+        if suffix:
+            return f"{end_date[:4]}{suffix}"
+    return str(end_date)
+
+
+def _dedupe_period_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按 (end_date, report_type) 折叠成「一期一行」：
+    1) 先按整行内容字节级去重（同一期出现的完全重复行纯浪费摘要预算——income/balancesheet
+       等官方接口偶发返回完全重复行，顺路在这里解决）；
+    2) 同一期仍剩多行时（真实样本：同一 20250331 出现两条，仅 rd_exp 有无差异——大概率是
+       「预披露/后补齐」的两版同期数据），保留非空字段更多的一条。
+    用 (end_date, report_type) 而非单纯 end_date 做分组键：income/balancesheet 等接口的
+    report_type 区分「合并报表/调整前/调整后」等真实不同的报表口径，同一期出现多个
+    report_type 是正常业务语义，不该被误当重复行合并掉；report_type 不存在的接口（如
+    fina_indicator）该键退化成 None，等价于纯按 end_date 分组。"""
+    seen_exact: set[str] = set()
+    exact_uniq: list[dict[str, Any]] = []
+    for row in rows:
+        key = json.dumps(row, sort_keys=True, ensure_ascii=False, default=str)
+        if key in seen_exact:
+            continue
+        seen_exact.add(key)
+        exact_uniq.append(row)
+
+    def completeness(r: dict[str, Any]) -> int:
+        return sum(1 for v in r.values() if v is not None and v != "")
+
+    best_by_period: dict[tuple[str, Any], dict[str, Any]] = {}
+    order: list[tuple[str, Any]] = []
+    for row in exact_uniq:
+        pkey = (str(row.get("end_date")), row.get("report_type"))
+        prior = best_by_period.get(pkey)
+        if prior is None:
+            order.append(pkey)
+            best_by_period[pkey] = row
+        elif completeness(row) >= completeness(prior):
+            best_by_period[pkey] = row
+    return [best_by_period[k] for k in order]
+
+
+def _render_period_table(rows: list[dict[str, Any]], limit: int) -> str:
+    """把已按期去重的行数组渲成 Markdown 表：期次标签与 end_date 并列打头（每行的期次归属
+    不需要靠数组位置去数），ts_code 全表一致时提到表头外（避免每行重复同一代码占预算），
+    其余字段按各行首次出现的顺序做列并集（个别期次缺列时留空，不同期字段集合可能不完全一致）。
+
+    超限按「整期」二分裁剪，只保留最近 N 期整行——不像 _truncate_rows_head_tail 那样保留
+    首尾两段，因为报告期表逐期独立取值（不像 daily 序列要靠首尾两端算区间涨跌幅），近端
+    数据对多数分析问题更常用。被裁掉的期次在表格下面按标签点名（而非只报「省略 N 行」）
+    ——线上事故的直接教训：匿名的「已取回但未展示」会诱导模型拿邻近可见期顶替，点名后
+    模型能明确知道该重新按期次取数，而不会去顶替。"""
+    if not rows:
+        return ""
+    uniq = _dedupe_period_rows(rows)
+    ordered = sorted(uniq, key=lambda r: str(r.get("end_date")), reverse=True)
+
+    ts_codes = {r.get("ts_code") for r in ordered if r.get("ts_code") not in (None, "")}
+    hoist_ts = len(ts_codes) == 1
+    ts_code_value = next(iter(ts_codes)) if hoist_ts else None
+
+    cols: list[str] = []
+    for r in ordered:
+        for k in r:
+            if k == "end_date" or (hoist_ts and k == "ts_code"):
+                continue
+            if k not in cols:
+                cols.append(k)
+    header = ["报告期", "end_date"] + cols
+
+    def fmt(v: Any) -> str:
+        return "—" if v is None or v == "" else str(v)
+
+    def render(subset: list[dict[str, Any]]) -> str:
+        lines = [f"标的：{ts_code_value}"] if hoist_ts else []
+        lines.append("| " + " | ".join(header) + " |")
+        lines.append("|" + "|".join(["---"] * len(header)) + "|")
+        for r in subset:
+            vals = [_period_label(r.get("end_date")), fmt(r.get("end_date"))] + [fmt(r.get(c)) for c in cols]
+            lines.append("| " + " | ".join(vals) + " |")
+        return "\n".join(lines)
+
+    full = render(ordered)
+    if len(full) <= limit:
+        return full
+
+    lo, hi, best = 1, len(ordered), 0
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if len(render(ordered[:mid])) <= limit:
+            best = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    if best == 0:
+        return full[:limit]  # 极端兜底：单期都放不下（现实中很难触发）
+    kept, dropped = ordered[:best], ordered[best:]
+    dropped_labels = "、".join(_period_label(r.get("end_date")) for r in dropped)
+    note = (
+        f"\n\n……以下 {len(dropped)} 期因摘要长度限制未展示"
+        f"（数据已取回，非未接入；如需要请单独按期次重新查询）：{dropped_labels}"
+    )
+    return render(kept) + note
+
+
+def _evidence_content(content: str, limit: int = _MAX_EVIDENCE_CHARS) -> str:
+    """证据 content 入口：命中「end_date 报告期行数组」（income/balancesheet/cashflow/
+    fina_indicator/forecast/express 等接口的典型返回形状）时优先走确定性表格化
+    （_render_period_table），避免模型在多期相似行里靠数组位置对齐期次；不命中
+    （daily/daily_basic 等 trade_date 日历序列、RAG 散文、非行数据、单行数据）就维持
+    原 _truncate_head_tail 行为完全不变——本函数只是在其前面新增一条判别分支，
+    _truncate_head_tail 本身不做任何修改。"""
+    try:
+        body = json.loads(content)
+    except (ValueError, TypeError):
+        return _truncate_head_tail(content, limit)
+    container = _data_container(body)
+    if not container or len(container) <= 1:
+        return _truncate_head_tail(content, limit)
+    rows = [r for r in container if isinstance(r, dict)]
+    if not rows or "end_date" not in rows[0]:
+        return _truncate_head_tail(content, limit)
+    return _render_period_table(rows, limit)
 
 
 def _append_assistant_frame(messages: list[dict[str, Any]], llm: Any, resp: Any) -> None:

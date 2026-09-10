@@ -350,10 +350,25 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         logger.warning("忽略无效/已停用的 skill：%s", req.skill)
 
     async def _run_agent() -> None:
-        llm = DeepSeekLLMClient(
+        # 深度思考（deepseek-reasoner）只作用于最终 synthesizer：router/rewrite_query/tool_rag 选工具
+        # 三步要么非流式从不展示推理过程（router/rewrite_query），要么是循环体、每轮都调一次（tool_rag）——
+        # 套用 reasoner 只会白白拉长延迟，不产出任何用户可见收益。fast_llm 恒用 settings.ds_model；
+        # 只有当请求的 model 与之不同（用户开了深度思考）才额外建一个 reasoner client 只喂给 synthesizer。
+        fast_model = settings.ds_model or None
+        requested_model = (req.model or settings.ds_model) or None
+        fast_llm = DeepSeekLLMClient(
             api_key=settings.ds_api_key,
             base_url=settings.ds_base_url or None,
-            model=(req.model or settings.ds_model) or None,
+            model=fast_model,
+        )
+        synth_llm = (
+            fast_llm
+            if requested_model == fast_model
+            else DeepSeekLLMClient(
+                api_key=settings.ds_api_key,
+                base_url=settings.ds_base_url or None,
+                model=requested_model,
+            )
         )
         tools = None
         acquired_from_pool = False
@@ -367,7 +382,7 @@ async def chat(req: ChatRequest) -> StreamingResponse:
                 # MCP 全局开关关闭：不触碰工具池（避免误触发懒建），Agent 退化为纯 LLM 聊天。
                 tools = NullToolProvider()
             # 直接使用原始 MCP provider：LLM 看到服务端暴露的全部工具（list_apis/get_api_info/query + 各接口工具），可查任意标的任意接口
-            agent = Agent(llm=llm, tools=tools, config=settings)
+            agent = Agent(llm=fast_llm, tools=tools, config=settings, synth_llm=synth_llm)
             result = await agent.run(
                 req.message,
                 history=history,

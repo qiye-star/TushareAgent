@@ -95,3 +95,62 @@ async def test_domain_alias_shared_consistency() -> None:
 
     assert DOMAIN_ALIASES["乘用车"] == ("汽车", "新能源汽车", "整车")
     assert _domain_terms("乘用车业务") == _domain_expand("乘用车业务") == ["汽车", "新能源汽车", "整车"]
+
+
+# ---------------------------------------------------------------------------
+# REPORT_BASELINE_FAMILIES：report/compare 意图恒揭示标准财报接口
+# （回归：字面零命中话题词的报告类问法，此前财务接口一个都不会被揭示给 LLM）
+# ---------------------------------------------------------------------------
+
+BASELINE_SPECS = list(PICTURE_SPECS) + [
+    ToolSpec("balancesheet", "资产负债表"),
+    ToolSpec("cashflow", "现金流量表"),
+    ToolSpec("daily_basic", "每日指标（市值/PE/PB）"),
+    ToolSpec("forecast", "业绩预告"),
+    ToolSpec("express", "业绩快报"),
+]
+
+_ZERO_HIT_REPORT_QUERY = "写一份寒武纪业绩点评报告"  # 字面不含「财务」「业绩预告」等任何 _TOPIC_KEYWORDS 触发子串
+
+
+async def test_select_tools_report_intent_forces_baseline_on_zero_keyword_hit() -> None:
+    """零关键词命中的报告类问法，report 意图下 REPORT_BASELINE_FAMILIES 仍恒揭示（对应实测过的真实 bug）。"""
+    names = [s.name for s in select_tools(BASELINE_SPECS, _ZERO_HIT_REPORT_QUERY, intent="report")]
+    assert_meta_present(names)
+    for fam in ("income", "fina_indicator", "balancesheet", "cashflow", "daily_basic", "forecast", "express"):
+        assert fam in names, f"{fam} 应被 report 意图恒揭示"
+    assert "bond_basic" not in names  # 与财报无关，不应被误伤
+
+
+async def test_select_tools_market_intent_does_not_force_baseline() -> None:
+    """同样零命中的问法，market 意图（或不传 intent）不触发 baseline 恒揭示——不给多数行情问题加无谓负担。"""
+    for intent in (None, "market"):
+        names = [s.name for s in select_tools(BASELINE_SPECS, _ZERO_HIT_REPORT_QUERY, intent=intent)]
+        assert_meta_present(names)
+        for fam in ("balancesheet", "cashflow", "daily_basic", "forecast", "express"):
+            assert fam not in names, f"{fam} 不应在 market/无意图下被恒揭示"
+
+
+async def test_select_tools_compare_intent_also_forces_baseline() -> None:
+    """compare 意图与 report 意图同等享受 baseline 恒揭示。"""
+    names = [s.name for s in select_tools(BASELINE_SPECS, _ZERO_HIT_REPORT_QUERY, intent="compare")]
+    for fam in ("income", "fina_indicator", "balancesheet", "cashflow", "daily_basic", "forecast", "express"):
+        assert fam in names
+
+
+async def test_select_tools_baseline_respects_blocked_catalog() -> None:
+    """baseline 恒揭示不能绕过可用性探测：被 catalog 标 blocked/down 的接口仍要排除。"""
+    catalog = {"income": {"status": "blocked", "msg": "积分不足"}, "cashflow": {"status": "down"}}
+    names = [s.name for s in select_tools(BASELINE_SPECS, _ZERO_HIT_REPORT_QUERY, intent="report", catalog=catalog)]
+    assert "income" not in names and "cashflow" not in names
+    assert "fina_indicator" in names and "balancesheet" in names  # 未被标记的其它 baseline 接口不受影响
+
+
+async def test_select_tools_unverified_baseline_family_is_noop_when_absent() -> None:
+    """balancesheet/cashflow 若在当前部署下其实不存在（specs 里没有），子串匹配空转，不报错、不误伤其它逻辑。"""
+    specs_without_bs_cf = [s for s in BASELINE_SPECS if s.name not in ("balancesheet", "cashflow")]
+    names = [s.name for s in select_tools(specs_without_bs_cf, _ZERO_HIT_REPORT_QUERY, intent="report")]
+    assert_meta_present(names)
+    assert "balancesheet" not in names and "cashflow" not in names  # 压根不存在，自然不会出现
+    for fam in ("income", "fina_indicator", "daily_basic", "forecast", "express"):
+        assert fam in names  # 其余 baseline 接口不受影响

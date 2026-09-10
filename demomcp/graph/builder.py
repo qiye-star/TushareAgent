@@ -32,6 +32,8 @@ def build_research_graph(
     curate=None,
     max_iterations: int = 10,
     no_progress_cap: int = 2,
+    tool_call_timeout: float | None = 90.0,
+    synth_llm=None,
 ) -> object:
     """编译状态机，返回 langgraph CompiledStateGraph。
 
@@ -41,15 +43,18 @@ def build_research_graph(
     （返回无 tool_uses）或执行轮数达上限才收尾生成/兜底。默认 10，与 `Settings.max_iterations` 对齐。
     no_progress_cap：进展守卫——某工具轮未新增任何证据/检索时视为无进展，连续达该值即终止循环
     （防「无权限/无数据/查不到」时反复空转烧满 max_iterations 造成死循环）。默认 2。
+    tool_call_timeout：单个工具调用的护栏超时（秒），None 表示不设护栏（沿用 ToolProvider 自身超时）。
+    synth_llm：可选，专供 synthesizer 用的 LLMClient（如深度思考模型）；None 则回退用 llm——
+    router/rewrite_query/tool_rag 三步恒用 llm（不需要展示推理过程的快模型）。
     """
     g = StateGraph(GraphState)
     g.add_node("router", make_router(llm, max_tokens=max_tokens, skills=skills))
-    g.add_node("rewrite_query", make_rewrite_query(llm, max_tokens=max_tokens))
+    g.add_node("rewrite_query", make_rewrite_query(llm, max_tokens=max_tokens, skills=skills))
     g.add_node(
         "tool_rag",
-        make_tool_rag(llm, tools, tool_defs, max_tokens=max_tokens, base_system=base_system, retriever=retriever, skills=skills, curate=curate, max_iterations=max_iterations, no_progress_cap=no_progress_cap),
+        make_tool_rag(llm, tools, tool_defs, max_tokens=max_tokens, base_system=base_system, retriever=retriever, skills=skills, curate=curate, max_iterations=max_iterations, no_progress_cap=no_progress_cap, tool_call_timeout=tool_call_timeout),
     )
-    g.add_node("synthesizer", make_synthesizer(llm, max_tokens=max_tokens, disclaimer=disclaimer, base_system=base_system, skills=skills))
+    g.add_node("synthesizer", make_synthesizer(synth_llm or llm, max_tokens=max_tokens, disclaimer=disclaimer, base_system=base_system, skills=skills))
     g.add_node("fallback", make_fallback(disclaimer=disclaimer, skills=skills))
 
     g.add_edge(START, "router")

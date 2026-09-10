@@ -120,6 +120,11 @@ class Settings(BaseSettings):
     mcp_gateway_admin_url: str = Field(default="", alias="MCP_GATEWAY_ADMIN_URL")  # 管理 REST base；空则从上面推导（同 host:port，去掉 /mcp 路径）
     mcp_timeout: float = Field(default=30.0, alias="DEMO_MCP_TIMEOUT")   # 单次工具调用读超时（秒）
     mcp_retries: int = Field(default=2, alias="DEMO_MCP_RETRIES")        # 工具调用重试次数
+    # tool_rag 单轮 gather 里单个工具调用的护栏超时：防止一个慢/挂死的工具拖住整轮，
+    # 其它已就绪的工具结果 + RAG 仍能按时汇总。90s 而非更激进的 60s——
+    # MCPToolProvider 自身最坏情况（重试 2 次 × mcp_timeout(30s) + 退避 + 一次断线重连 ~30s）已接近 90s，
+    # 设太低会把「第二次尝试即将成功」的可恢复慢调用直接打断。仍明显小于 web.py 的 AGENT_IDLE_TIMEOUT(240s)。
+    tool_call_timeout: float = Field(default=90.0, alias="DEMO_TOOL_CALL_TIMEOUT")
     mcp_keepalive_interval: float = Field(default=45.0, alias="DEMO_MCP_KEEPALIVE")  # 保活 ping 间隔（秒）；0=关闭保活
     tool_pool_hot_start: bool = Field(default=True, alias="TOOL_POOL_HOT_START")  # web 启动即连网关（热启动；网关没起来就退避重试），false=首个 /chat 冷连
 

@@ -57,6 +57,25 @@ _TOPIC_KEYWORDS: dict[str, tuple[str, ...]] = {
     "快报": ("daily", "daily_basic", "forecast", "announcement"),
 }
 
+# report/compare 意图下「恒揭示」的标准财报数据族——独立于 _TOPIC_KEYWORDS 的语义打分，
+# 直接堵住已确认的根因：查询字面没命中任何话题词（如「写一份寒武纪业绩点评报告」，字面不含
+# 「财务」「业绩预告」等任何触发子串）→ 财务类接口一个都不会被揭示给 LLM，模型物理上无从调用。
+# 复用 select_tools 里 skill_tools 已有的「接口名子串 → 恒保留、不进 max_revealed 限额」机制，
+# 不是第二套新逻辑。
+#
+# 置信度分层（供后续核实/裁剪参考，勿一并当作同等确定）：
+# - 已在真实 session/测试里观察到被成功调用：income、fina_indicator、daily_basic、forecast、express。
+# - 命名符合 Tushare Pro 官方接口习惯、但本仓库尚无独立实测/夹具证据（中等置信度）：
+#   balancesheet（资产负债表）、cashflow（现金流量表）。若这两个名字在当前部署下其实不存在，
+#   子串匹配对任何 spec 都不会命中，不会报错、也不会挤占其它揭示逻辑（纯 no-op）——
+#   因此按「有则用、无则空转」保留，而非因为不确定就整体去掉。
+REPORT_BASELINE_FAMILIES: frozenset[str] = frozenset(
+    {
+        "income", "fina_indicator", "daily_basic", "forecast", "express",
+        "balancesheet", "cashflow",
+    }
+)
+
 
 def _norm(s: str) -> str:
     """归一化匹配串：小写、去空白。"""
@@ -100,14 +119,22 @@ def select_tools(
     meta: frozenset[str] = META_TOOL_NAMES,
     catalog: dict[str, Any] | None = None,
     skill_tools: frozenset[str] = frozenset(),
+    intent: str | None = None,
 ) -> list[ToolSpec]:
-    """挑出本轮该喂给 LLM 的子集：meta + skill_tools 恒在 + 相关性 top-K；可用性 catalog 剔除 blocked/down。
+    """挑出本轮该喂给 LLM 的子集：meta + skill_tools（+ report/compare 意图下的 REPORT_BASELINE_FAMILIES）
+    恒在 + 相关性 top-K；可用性 catalog 剔除 blocked/down。
 
-    - skill_tools：skill 声明的接口名子串（如快报→daily/forecast/announcement），**恒保留**、不进 max_revealed 限额。
+    - skill_tools：skill 声明的接口名子串，**恒保留**、不进 max_revealed 限额。
+    - intent in ("report", "compare") 时，REPORT_BASELINE_FAMILIES 并入同一恒保留集合——不依赖关键词
+      是否命中，直接覆盖标准财报科目（利润表/资产负债表/现金流量表/财务指标/估值/业绩预告快报）；
+      堵住「问法字面没命中任何话题词 → 财务接口零揭示」的坑。
     - 若既无 meta 也无相关候选（零命中），回退到原 `specs` 不做减法，避免 LLM 无工具可选。
     """
     query = query or ""
     vocab = {_norm(t) for t in [*extract_concepts(query), *_domain_terms(query)] if t}
+    always_families = skill_tools | (
+        REPORT_BASELINE_FAMILIES if intent in ("report", "compare") else frozenset()
+    )
 
     blocked: set[str] = set()
     if catalog:
@@ -123,8 +150,8 @@ def select_tools(
             continue
         if spec.name in blocked:
             continue
-        if any(sf in _norm(spec.name) for sf in skill_tools):
-            meta_specs.append(spec)  # skill 所需接口恒保留
+        if any(sf in _norm(spec.name) for sf in always_families):
+            meta_specs.append(spec)  # skill / report-baseline 接口恒保留
             continue
         score = _score(spec, query, vocab)
         if score > 0:

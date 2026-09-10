@@ -48,7 +48,6 @@ async def test_router_tool_synthesize_end_to_end(make_settings) -> None:
     mock = MockLLM(
         [
             _router_response('{"intent":"market","out_of_scope":false}'),
-            ChatResponse(stop_reason="end_turn", text="比亚迪 最近价格 区间"),  # rewrite_query
             _tool_use_response("c1", "stock_price_range", {"name": "比亚迪"}),
             _stop_response(),  # 看到返回后判定数据已足 → 停止取数
             ChatResponse(stop_reason="end_turn", text="比亚迪区间约 1604.9 元。"),
@@ -64,7 +63,7 @@ async def test_router_tool_synthesize_end_to_end(make_settings) -> None:
     assert len(result.tool_results) == 1
     assert result.tool_results[0].is_error is False
     assert result.citations == ["stock_price_range"]
-    assert len(mock.calls) == 5  # router / rewrite_query / tool选择 / 停止判定 / synthesizer
+    assert len(mock.calls) == 4  # router / tool选择（market 意图跳过 rewrite_query）/ 停止判定 / synthesizer
     # 决策与生成步骤都应确定性（temperature=0），同问应得同答
     assert all(c.get("temperature") == 0 for c in mock.calls)
 
@@ -86,7 +85,6 @@ async def test_no_tool_call_fallback(make_settings) -> None:
     mock = MockLLM(
         [
             _router_response('{"intent":"market","out_of_scope":false}'),
-            ChatResponse(stop_reason="end_turn", text="比亚迪 行情"),  # rewrite_query
             ChatResponse(stop_reason="end_turn", text="我不知道要用什么工具。"),
         ]
     )
@@ -96,7 +94,7 @@ async def test_no_tool_call_fallback(make_settings) -> None:
     assert result.stopped_reason == "fallback"
     assert "未调用取数工具且没有获取到可校验的数据" in result.final_text
     assert result.tool_results == []
-    assert len(mock.calls) == 3  # router + rewrite_query + tool选择
+    assert len(mock.calls) == 2  # router + tool选择（market 意图跳过 rewrite_query）
 
 
 # ---- 零证据停止轮「直接作答」（同题二答回显，f2d8b91b 线上事故） ----
@@ -120,7 +118,6 @@ async def test_no_tool_direct_answer_echo_passthrough(make_settings) -> None:
     答案 → end_turn 定稿（免调合成器 LLM），而非「未识别出可用工具」的误导兜底。"""
     mock = MockLLM([
         _router_response('{"intent":"market","out_of_scope":false}'),
-        ChatResponse(stop_reason="end_turn", text="沪深300 2024 涨跌幅"),  # rewrite_query
         ChatResponse(stop_reason="end_turn", text=_ECHO_ANSWER),  # select：无 tool_uses + 直接作答
     ])
     agent = Agent(llm=mock, tools=FakeToolProvider(SPECS, {}), config=make_settings())
@@ -130,7 +127,7 @@ async def test_no_tool_direct_answer_echo_passthrough(make_settings) -> None:
     assert result.mode == "agent"
     assert "14.68%" in result.final_text
     assert "未调用取数工具" not in result.final_text
-    assert len(mock.calls) == 3  # router + rewrite_query + select；合成器免调
+    assert len(mock.calls) == 2  # router + select（market 意图跳过 rewrite_query）；合成器免调
     assert result.structured is not None
     assert result.structured["answer"] == result.final_text
     assert result.structured["metadata"]["direct_answer"] is True
@@ -142,7 +139,6 @@ async def test_no_tool_direct_answer_quick_variant(make_settings) -> None:
     """同一回显在 quick 模式下同样定稿（select 轮 system 含「快速问答模式」后缀）。"""
     mock = MockLLM([
         _router_response('{"intent":"market","out_of_scope":false}'),
-        ChatResponse(stop_reason="end_turn", text="沪深300 2024 涨跌幅"),
         ChatResponse(stop_reason="end_turn", text=_ECHO_ANSWER),
     ])
     agent = Agent(llm=mock, tools=FakeToolProvider(SPECS, {}), config=make_settings())
@@ -151,33 +147,31 @@ async def test_no_tool_direct_answer_quick_variant(make_settings) -> None:
     assert result.stopped_reason == "end_turn"
     assert result.mode == "quick"
     assert "14.68%" in result.final_text
-    assert len(mock.calls) == 3
-    assert "快速问答模式" in mock.calls[2]["system"]  # quick 后缀仍在 select 轮生效
+    assert len(mock.calls) == 2  # router + select（market 意图跳过 rewrite_query）
+    assert "快速问答模式" in mock.calls[1]["system"]  # quick 后缀仍在 select 轮生效
 
 
 async def test_no_tool_failure_phrasing_still_falls_back(make_settings) -> None:
     """零证据停止轮输出含「取不到」类措辞的长句（>=30 字符）→ 仍诚实兜底，不转正为答案。"""
     mock = MockLLM([
         _router_response('{"intent":"market","out_of_scope":false}'),
-        ChatResponse(stop_reason="end_turn", text="沪深300 2024 涨跌幅"),
         ChatResponse(stop_reason="end_turn", text="我没有找到 2024 年沪深 300 指数的相关行情数据，请稍后重试或改用其他数据源。"),
     ])
     result = await Agent(llm=mock, tools=FakeToolProvider(SPECS, {}), config=make_settings()).run("沪深300 2024 涨跌幅", mode="agent")
     assert result.stopped_reason == "fallback"
     assert "未调用取数工具且没有获取到可校验的数据" in result.final_text
-    assert len(mock.calls) == 3
+    assert len(mock.calls) == 2  # router + select（market 意图跳过 rewrite_query）
 
 
 async def test_no_tool_short_text_still_falls_back(make_settings) -> None:
     """30 字符下限：极短停止文本不转正为答案（test_empty_evidence_fallback 的「数据已足。」同理）。"""
     mock = MockLLM([
         _router_response('{"intent":"market","out_of_scope":false}'),
-        ChatResponse(stop_reason="end_turn", text="沪深300 2024 涨跌幅"),
         ChatResponse(stop_reason="end_turn", text="好的。"),
     ])
     result = await Agent(llm=mock, tools=FakeToolProvider(SPECS, {}), config=make_settings()).run("沪深300 2024 涨跌幅", mode="agent")
     assert result.stopped_reason == "fallback"
-    assert len(mock.calls) == 3
+    assert len(mock.calls) == 2  # router + select（market 意图跳过 rewrite_query）
 
 
 async def test_direct_answer_ignored_when_evidence_exists(make_settings) -> None:
@@ -187,7 +181,6 @@ async def test_direct_answer_ignored_when_evidence_exists(make_settings) -> None
     )
     mock = MockLLM([
         _router_response('{"intent":"market","out_of_scope":false}'),
-        ChatResponse(stop_reason="end_turn", text="比亚迪 最近价格 区间"),  # rewrite_query
         _tool_use_response("c1", "stock_price_range", {"name": "比亚迪"}),
         ChatResponse(stop_reason="end_turn", text="数据已足。区间表现已给出如下。"),  # 停止判定（有证据）
         ChatResponse(stop_reason="end_turn", text="比亚迪区间约 1604.9 元。"),  # synthesizer
@@ -195,7 +188,7 @@ async def test_direct_answer_ignored_when_evidence_exists(make_settings) -> None
     result = await Agent(llm=mock, tools=tools, config=make_settings()).run("比亚迪最近价格", mode="agent")
 
     assert result.stopped_reason == "end_turn"
-    assert len(mock.calls) == 5  # 合成器正常调用
+    assert len(mock.calls) == 4  # 合成器正常调用（market 意图跳过 rewrite_query）
     assert "1604" in result.final_text
     assert result.structured["metadata"]["direct_answer"] is False
 
@@ -233,7 +226,6 @@ async def test_evidence_truncation_keeps_head_tail(make_settings) -> None:
     tools = FakeToolProvider(SPECS, {"stock_price_range": ToolResult(content=content, is_error=False)})
     mock = MockLLM([
         _router_response('{"intent":"market","out_of_scope":false}'),
-        ChatResponse(stop_reason="end_turn", text="沪深300 2024 涨跌幅"),
         _tool_use_response("c1", "stock_price_range", {"name": "沪深300"}),
         _stop_response(),
         ChatResponse(stop_reason="end_turn", text="两端数据都已取到。"),
@@ -241,13 +233,87 @@ async def test_evidence_truncation_keeps_head_tail(make_settings) -> None:
     result = await Agent(llm=mock, tools=tools, config=make_settings()).run("沪深300 2024 涨跌幅", mode="agent")
 
     assert result.stopped_reason == "end_turn"
-    synth_content = mock.calls[4]["messages"][0]["content"]  # synthesizer user message
+    synth_content = mock.calls[3]["messages"][0]["content"]  # synthesizer user message（market 意图跳过 rewrite_query）
     assert "20241231" in synth_content  # 首（期末）
     assert "20241102" in synth_content  # 尾（第 60 行）
     assert "中间省略" in synth_content
     assert "20241204" not in synth_content  # 中部日期在摘要中被折叠
     data = result.structured["sources"][0]["data"]
     assert "20241204" in data  # raw 全量供前端来源卡
+
+
+# 真实抓取的完整返回（含全部 17 字段，3959 字符，>_MAX_EVIDENCE_CHARS=2000）——字段宽度必须
+# 贴近真实，否则内容长度不超预算就不会触发原字符位置截断，测不出真实事故的触发条件。
+_CATL_FINA_INDICATOR_JSON = (
+    '[{"ts_code": "300750.SZ", "end_date": "20260630", "ann_date": "20260725", "grossprofit_margin": 23.9284, '
+    '"gross_margin": 66261690000.0, "netprofit_margin": 16.9837, "roe": 12.0827, "roe_waa": 12.08, '
+    '"debt_to_assets": 63.6525, "or_yoy": 54.8004, "netprofit_yoy": 41.9839, "q_gsprofit_margin": 23.1532, '
+    '"q_sales_yoy": 56.9154, "q_profit_yoy": 38.7891, "eps": 9.51, "bps": 81.9932, "ocfps": 13.0152}, '
+    '{"ts_code": "300750.SZ", "end_date": "20260331", "ann_date": "20260416", "grossprofit_margin": 24.8156, '
+    '"gross_margin": 32044671000.0, "netprofit_margin": 17.6079, "roe": 5.9731, "roe_waa": 5.98, '
+    '"debt_to_assets": 62.3223, "or_yoy": 52.4487, "netprofit_yoy": 48.5237, "q_gsprofit_margin": 24.8156, '
+    '"q_sales_yoy": 52.4487, "q_profit_yoy": 52.993, "eps": 4.58, "bps": 78.2773, "ocfps": 7.3796}, '
+    '{"ts_code": "300750.SZ", "end_date": "20251231", "ann_date": "20260310", "grossprofit_margin": 26.2728, '
+    '"gross_margin": 111318537000.0, "netprofit_margin": 18.1227, "roe": 24.7249, "roe_waa": 24.91, '
+    '"debt_to_assets": 61.9393, "or_yoy": 17.0406, "netprofit_yoy": 42.2834, "q_gsprofit_margin": 28.2114, '
+    '"q_sales_yoy": 36.5765, "q_profit_yoy": 60.339, "eps": 16.14, "bps": 73.8655, "ocfps": 29.1906}, '
+    '{"ts_code": "300750.SZ", "end_date": "20250930", "ann_date": "20251021", "grossprofit_margin": 25.3098, '
+    '"gross_margin": 71644840000.0, "netprofit_margin": 18.4748, "roe": 17.4754, "roe_waa": 17.76, '
+    '"debt_to_assets": 61.2745, "or_yoy": 9.2753, "netprofit_yoy": 36.2018, "q_gsprofit_margin": 25.8022, '
+    '"q_sales_yoy": 12.9043, "q_profit_yoy": 43.8635, "eps": 11.02, "bps": 68.8709, "ocfps": 17.6776}, '
+    '{"ts_code": "300750.SZ", "end_date": "20250630", "ann_date": "20250731", "grossprofit_margin": 25.023, '
+    '"gross_margin": 44762650000.0, "netprofit_margin": 18.0928, "roe": 11.2522, "roe_waa": 11.63, '
+    '"debt_to_assets": 62.5927, "or_yoy": 7.2673, "netprofit_yoy": 33.3267, "q_gsprofit_margin": 25.5763, '
+    '"q_sales_yoy": 8.2597, "q_profit_yoy": 27.9218, "eps": 6.92, "bps": 64.6859, "ocfps": 12.8719}, '
+    '{"ts_code": "300750.SZ", "end_date": "20250331", "ann_date": "20250415", "grossprofit_margin": 24.4077, '
+    '"gross_margin": 20674478000.0, "netprofit_margin": 17.5453, "roe": 5.4918, "roe_waa": 5.49, '
+    '"debt_to_assets": 64.7433, "or_yoy": 6.185, "netprofit_yoy": 32.8512, "q_gsprofit_margin": 24.4077, '
+    '"q_sales_yoy": 6.185, "q_profit_yoy": 32.7448, "eps": 3.18, "bps": 59.3991, "ocfps": 7.4643}, '
+    '{"ts_code": "300750.SZ", "end_date": "20241231", "ann_date": "20250315", "grossprofit_margin": 24.4449, '
+    '"gross_margin": 88493595000.0, "netprofit_margin": 14.9185, "roe": 22.8252, "roe_waa": 24.13, '
+    '"debt_to_assets": 65.2382, "or_yoy": -9.7039, "netprofit_yoy": 15.0119, "q_gsprofit_margin": 15.0355, '
+    '"q_sales_yoy": -3.0798, "q_profit_yoy": 7.2221, "eps": 11.58, "bps": 56.0763, "ocfps": 22.0259}, '
+    '{"ts_code": "300750.SZ", "end_date": "20240930", "ann_date": "20241019", "grossprofit_margin": 28.185, '
+    '"gross_margin": 73011847700.0, "netprofit_margin": 14.9523, "roe": 16.565, "roe_waa": 17.73, '
+    '"debt_to_assets": 64.3338, "or_yoy": -12.092, "netprofit_yoy": 15.5901, "q_gsprofit_margin": 31.1698, '
+    '"q_sales_yoy": -12.4757, "q_profit_yoy": 25.458, "eps": 8.1894, "bps": 53.8246, "ocfps": 15.3198}, '
+    '{"ts_code": "300750.SZ", "end_date": "20240630", "ann_date": "20240727", "grossprofit_margin": 26.5334, '
+    '"gross_margin": 44248984800.0, "netprofit_margin": 14.9183, "roe": 11.6084, "roe_waa": 11.39, '
+    '"debt_to_assets": 69.264, "or_yoy": -11.8783, "netprofit_yoy": 10.3668, "q_gsprofit_margin": 26.6416, '
+    '"q_sales_yoy": -13.1842, "q_profit_yoy": 20.1062, "eps": 5.2017, "bps": 44.6101, "ocfps": 10.1639}, '
+    '{"ts_code": "300750.SZ", "end_date": "20240331", "ann_date": "20240416", "grossprofit_margin": 26.4155, '
+    '"gross_margin": 21071872300.0, "netprofit_margin": 14.0348, "roe": 5.1845, "roe_waa": 5.18, '
+    '"debt_to_assets": 68.4845, "or_yoy": -10.4086, "netprofit_yoy": 7.001, "q_gsprofit_margin": 26.4155, '
+    '"q_sales_yoy": -10.4086, "q_profit_yoy": 11.0612, "eps": 2.3909, "bps": 47.2216, "ocfps": 6.4464}]'
+)
+
+
+async def test_multi_period_evidence_labels_every_period_not_positional(make_settings) -> None:
+    """回归线上真实事故：宁德时代 fina_indicator 10 期数据（真实抓取，见 D:\\TushareAgent\\demo.db
+    session 4bb1229e3dbb turn 614）里，2025H1/2025Q1 曾被原字符位置截断折进「中间省略」，
+    模型转而用视野内可见的 2024H1/2024Q1 数值顶替、换标签充数（用户用 Wind 数据交叉核对发现）。
+
+    确定性表格化后，synthesizer 收到的证据摘要必须完整覆盖全部 10 期、按标签而非数组位置
+    展示，不再出现覆盖这两期的匿名省略。"""
+    tools = FakeToolProvider(
+        SPECS, {"stock_financials": ToolResult(content=_CATL_FINA_INDICATOR_JSON, is_error=False)}
+    )
+    mock = MockLLM([
+        _router_response('{"intent":"compare","out_of_scope":false}'),
+        ChatResponse(stop_reason="end_turn", text="宁德时代 毛利率 多期对比"),  # rewrite_query（compare 不跳过）
+        _tool_use_response("c1", "stock_financials", {"ts_code": "300750.SZ"}),
+        _stop_response(),
+        ChatResponse(stop_reason="end_turn", text="各期毛利率如上。"),
+    ])
+    result = await Agent(llm=mock, tools=tools, config=make_settings()).run("宁德时代多期毛利率对比")
+
+    assert result.stopped_reason == "end_turn"
+    synth_content = mock.calls[4]["messages"][0]["content"]
+    for label in ("2026H1", "2026Q1", "2025年报", "2025前三季度", "2025H1", "2025Q1", "2024年报", "2024前三季度", "2024H1", "2024Q1"):
+        assert label in synth_content, f"缺少期次标签 {label}"
+    assert "中间省略" not in synth_content  # 不应再出现覆盖任意期次的匿名省略
+    assert "25.023" in synth_content and "17.5453" in synth_content  # 真实 2025H1 数值（曾被顶替丢失）
+    assert "24.4077" in synth_content  # 真实 2025Q1 毛利率（曾被顶替丢失）
 
 
 async def test_empty_evidence_fallback(make_settings) -> None:
@@ -257,7 +323,6 @@ async def test_empty_evidence_fallback(make_settings) -> None:
     mock = MockLLM(
         [
             _router_response('{"intent":"market","out_of_scope":false}'),
-            ChatResponse(stop_reason="end_turn", text="比亚迪 最近价格"),  # rewrite_query
             _tool_use_response("c1", "stock_price_range", {"name": "比亚迪"}),
             _stop_response(),  # 看到空结果后判定停止 → 仍无证据 → no_evidence 兜底
         ]
@@ -270,7 +335,7 @@ async def test_empty_evidence_fallback(make_settings) -> None:
     # "[]" 不是错误，但为空数据 → 不算证据
     assert result.tool_results[0].is_error is False
     assert result.citations == []
-    assert len(mock.calls) == 4  # router + rewrite_query + tool选择 + 停止判定
+    assert len(mock.calls) == 3  # router + tool选择 + 停止判定（market 意图跳过 rewrite_query）
 
 
 async def test_tool_error_becomes_fallback(make_settings) -> None:
@@ -278,7 +343,6 @@ async def test_tool_error_becomes_fallback(make_settings) -> None:
     mock = MockLLM(
         [
             _router_response('{"intent":"market","out_of_scope":false}'),
-            ChatResponse(stop_reason="end_turn", text="比亚迪 行情"),  # rewrite_query
             _tool_use_response("c1", "stock_price_range", {"name": "比亚迪"}),
             _stop_response(),  # 看到失败结果后判定停止 → 仍无证据 → no_evidence 兜底
         ]
@@ -290,7 +354,7 @@ async def test_tool_error_becomes_fallback(make_settings) -> None:
     assert "未能取到可靠数据" in result.final_text
     assert len(result.tool_results) == 1
     assert result.tool_results[0].is_error is True  # 异常 → is_error，不算证据
-    assert len(mock.calls) == 4  # router + rewrite_query + tool选择 + 停止判定
+    assert len(mock.calls) == 3  # router + tool选择 + 停止判定（market 意图跳过 rewrite_query）
 
 
 class _RaisingLLM:
@@ -587,7 +651,6 @@ async def test_structured_output_present(make_settings) -> None:
     mock = MockLLM(
         [
             _router_response('{"intent":"market","out_of_scope":false}'),
-            ChatResponse(stop_reason="end_turn", text="比亚迪 行情"),  # rewrite_query
             _tool_use_response("c1", "stock_price_range", {"stock": "比亚迪"}),
             _stop_response(),  # 数据已足 → 去合成
             ChatResponse(stop_reason="end_turn", text="比亚迪区间约 1604.9 元。"),
@@ -602,16 +665,17 @@ async def test_structured_output_present(make_settings) -> None:
 
 
 async def test_params_normalized_and_validation(make_settings) -> None:
-    # A) 契约 JSON 带 source.params → 归一化参数进 structured.metadata.request
+    # A) 契约 JSON 带 data → 证据入账，请求参数取自工具调用的真实入参（tu.input），
+    # 归一化进 structured.metadata.request（不是从返回体里挖 source.params——官方
+    # Tushare/万得/iFind 的真实信封里从来没有这个字段，见 nodes.py 的注释）。
     tools = FakeToolProvider(
         SPECS,
-        {"stock_price_range": ToolResult(content='{"ok":true,"data":{"return_pct":2.65},"source":{"params":{"ts_code":"002594.SZ","start_date":"20260601","end_date":"20260731"}}}', is_error=False)},
+        {"stock_price_range": ToolResult(content='{"ok":true,"data":{"return_pct":2.65}}', is_error=False)},
     )
     mock = MockLLM(
         [
             _router_response('{"intent":"market","out_of_scope":false}'),
-            ChatResponse(stop_reason="end_turn", text="比亚迪 涨幅"),  # rewrite_query
-            _tool_use_response("c1", "stock_price_range", {"stock": "比亚迪"}),
+            _tool_use_response("c1", "stock_price_range", {"ts_code": "002594.SZ", "start_date": "20260601", "end_date": "20260731"}),
             _stop_response(),  # 数据已足 → 去合成
             ChatResponse(stop_reason="end_turn", text="涨幅 2.65%。"),
         ]
@@ -627,7 +691,6 @@ async def test_params_normalized_and_validation(make_settings) -> None:
     mock2 = MockLLM(
         [
             _router_response('{"intent":"market","out_of_scope":false}'),
-            ChatResponse(stop_reason="end_turn", text="比亚迪 近3月 涨幅"),  # rewrite_query
             _tool_use_response("c1", "stock_price_range", {"stock": "比亚迪", "start": "近3月"}),
             _stop_response(),  # 仍有校验失败、无证据 → 停止 → no_evidence 兜底
         ]
@@ -750,16 +813,20 @@ async def test_rewrite_query_llm_semantic() -> None:
     from demomcp.interfaces.types import ChatResponse
     from demomcp.providers.llm.mock import MockLLM
 
+    # intent="report"：_should_rag 为 True，rewrite_query 才会真正调用 LLM
+    # （market 等不跑 RAG 的意图下该节点直接跳过 LLM 调用，见 make_rewrite_query 的门控逻辑）。
     llm = MockLLM([ChatResponse(stop_reason="end_turn", text="比亚迪 2024 年研发投入 研发费用")])
     node = make_rewrite_query(llm)
-    out = await node({"original_query": "比亚迪去年研发花多少", "out_of_scope": False}, {})
+    out = await node({"original_query": "比亚迪去年研发花多少", "out_of_scope": False, "intent": "report"}, {})
     assert out["rewritten_query"] == "比亚迪 2024 年研发投入 研发费用"
 
     class _Boom:
         async def chat(self, **kwargs):
             raise ConnectionError("boom")
 
-    out2 = await make_rewrite_query(_Boom())({"original_query": "比亚迪去年研发花多少", "out_of_scope": False}, {})
+    out2 = await make_rewrite_query(_Boom())(
+        {"original_query": "比亚迪去年研发花多少", "out_of_scope": False, "intent": "report"}, {}
+    )
     assert out2["rewritten_query"]  # 兜底到确定性改写，仍非空
 
 
@@ -928,16 +995,56 @@ async def test_tool_rag_always_reveals_wind_meta_trio(make_settings) -> None:
     tools = FakeToolProvider(full, {})
     mock = MockLLM([
         _router_response('{"intent":"market","out_of_scope":false}'),
-        ChatResponse(stop_reason="end_turn", text="随便问点什么"),
         ChatResponse(stop_reason="end_turn", text="没有工具可用。"),
     ])
     agent = Agent(llm=mock, tools=tools, config=make_settings(tool_max_revealed=0))
     await agent.run("和金融毫不相关的一句话")
 
-    revealed = mock.calls[2]["tools"]
+    revealed = mock.calls[1]["tools"]  # market 意图跳过 rewrite_query，select 轮是第 2 次调用
     rnames = {t.name for t in revealed}
     assert {"wind_list_apis", "wind_get_api_info", "wind_query"} <= rnames
     assert {"list_apis", "get_api_info", "query", "stock_basic"} <= rnames
+
+
+async def test_curation_intent_treats_active_skill_as_report(make_settings) -> None:
+    """命中 skill 时即便 router 猜成 market 意图，取数引导与工具揭示也按 report 力度处理。
+
+    实测过的真实坑：forced_skill 场景下 router 看不到技能清单，对「寒武纪」这类裸标的词几乎总猜成
+    market；而 claude-for 导入技能各自的 tool_families 用的是原环境工具名（get_financials/wind_/ifind_
+    等），跟本部署 Tushare 官方接口名（income/balancesheet/cashflow…）对不上——两者叠加会让模型连
+    Tushare 财务接口都看不到，整份「业绩点评报告」查不到任何财报数据。这里用一个刻意只声明错误
+    tool_families 的测试 skill 复现该坑，验证 curation_intent 能兜底。"""
+    from demomcp.graph.builder import build_research_graph
+    from demomcp.graph.skills import Skill
+
+    full = SPECS + [
+        ToolSpec("income", "利润表"), ToolSpec("balancesheet", "资产负债表"),
+        ToolSpec("cashflow", "现金流量表"), ToolSpec("fina_indicator", "财务指标"),
+        ToolSpec("daily_basic", "每日指标"), ToolSpec("forecast", "业绩预告"),
+        ToolSpec("express", "业绩快报"),
+    ]
+    tools = FakeToolProvider(full, {})
+    test_skill = Skill(
+        id="test-earnings-skill", name="测试业绩点评", description="测试用",
+        system_prompt=lambda base: base, tool_families=("get_financials",),  # 刻意用错工具名，模拟真实坑
+    )
+    cfg = make_settings()
+    mock = MockLLM([
+        _router_response('{"intent":"market","skill":"test-earnings-skill","out_of_scope":false}'),
+        ChatResponse(stop_reason="end_turn", text="没有更多工具可用。"),
+    ])
+    graph = build_research_graph(
+        mock, tools, full, max_tokens=cfg.ds_max_tokens, disclaimer=cfg.disclaimer,
+        base_system=cfg.system_prompt, skills=[test_skill],
+    )
+    state = {"messages": [{"role": "user", "content": "寒武纪"}], "original_query": "寒武纪",
+             "out_of_scope": False, "tool_results": [], "evidence": [], "rag_chunks": [], "citations": [], "usage": None}
+    await graph.ainvoke(state, config={"configurable": {}})
+
+    revealed = mock.calls[1]["tools"]  # skill 命中（should_rag 默认 False）跳过 rewrite_query
+    rnames = {t.name for t in revealed}
+    for fam in ("income", "balancesheet", "cashflow", "fina_indicator", "daily_basic", "forecast", "express"):
+        assert fam in rnames, f"{fam} 应因 skill 命中被恒揭示，即便 router 猜成 market 且 skill 自身 tool_families 用错名"
 
 
 # ---------------------------------------------------------------------------
@@ -1007,7 +1114,6 @@ async def test_agentic_loop_max_iterations_cutoff(make_settings) -> None:
     mock = MockLLM(
         [
             _router_response('{"intent":"market","out_of_scope":false}'),
-            ChatResponse(stop_reason="end_turn", text="比亚迪 区间 财务"),  # rewrite_query
             _tool_use_response("c1", "stock_price_range", {"name": "比亚迪"}),  # 第 1 轮 (continue)
             _tool_use_response("c2", "stock_financials", {"stock": "比亚迪"}),   # 第 2 轮 (max-reached)
             ChatResponse(stop_reason="end_turn", text="结果如下。"),  # synthesizer（上限后强制收尾）
@@ -1023,7 +1129,7 @@ async def test_agentic_loop_max_iterations_cutoff(make_settings) -> None:
     assert result.stopped_reason == "end_turn"
     assert [name for name, _ in tools.calls] == ["stock_price_range", "stock_financials"]  # 没有第 3 轮
     assert len(result.tool_results) == 2
-    assert len(mock.calls) == 5  # router / rewrite / 轮1 / 轮2 / synthesizer（无停止判定轮）
+    assert len(mock.calls) == 4  # router / 轮1 / 轮2 / synthesizer（market 跳过 rewrite，无停止判定轮）
     loop_turns = [d for k, d in events if k == "loop_turn"]
     assert [d["status"] for d in loop_turns] == ["continue", "max-reached"]
     assert [d["round"] for d in loop_turns] == [1, 2]
@@ -1040,7 +1146,6 @@ async def test_quick_mode_caps_at_one_tool_round(make_settings) -> None:
     mock = MockLLM(
         [
             _router_response('{"intent":"market","out_of_scope":false}'),
-            ChatResponse(stop_reason="end_turn", text="比亚迪 区间"),  # rewrite_query
             _tool_use_response("c1", "stock_price_range", {"name": "比亚迪"}),  # 唯一一轮
             ChatResponse(stop_reason="end_turn", text="（快速问答模式）区间价格如下。"),  # synthesizer（无停止判定轮）
         ]
@@ -1048,10 +1153,10 @@ async def test_quick_mode_caps_at_one_tool_round(make_settings) -> None:
     result = await Agent(llm=mock, tools=tools, config=cfg).run("比亚迪最新价格", mode="quick")
 
     assert [name for name, _ in tools.calls] == ["stock_price_range"]  # 只查了一次，没有第 2 轮
-    assert len(mock.calls) == 4  # router / rewrite / 唯一一轮 / synthesizer（比多轮模式少一次停止判定）
+    assert len(mock.calls) == 3  # router / 唯一一轮 / synthesizer（market 跳过 rewrite，比多轮模式少一次停止判定）
     assert result.mode == "quick"
     assert result.stopped_reason == "end_turn"
-    assert "快速问答模式" in mock.calls[2]["system"]  # tool_rag 选工具轮的 system 带上了快速模式声明
+    assert "快速问答模式" in mock.calls[1]["system"]  # tool_rag 选工具轮的 system 带上了快速模式声明
 
 
 async def test_agent_mode_default_unaffected_by_quick_mode_addition(make_settings) -> None:
@@ -1067,7 +1172,6 @@ async def test_agent_mode_default_unaffected_by_quick_mode_addition(make_setting
     mock = MockLLM(
         [
             _router_response('{"intent":"market","out_of_scope":false}'),
-            ChatResponse(stop_reason="end_turn", text="比亚迪 区间 财务"),  # rewrite_query
             _tool_use_response("c1", "stock_price_range", {"name": "比亚迪"}),  # 第 1 轮 (continue)
             _tool_use_response("c2", "stock_financials", {"stock": "比亚迪"}),  # 第 2 轮 (max-reached)
             ChatResponse(stop_reason="end_turn", text="结果如下。"),  # synthesizer（上限后强制收尾）
@@ -1076,9 +1180,9 @@ async def test_agent_mode_default_unaffected_by_quick_mode_addition(make_setting
     result = await Agent(llm=mock, tools=tools, config=cfg).run("比亚迪区间与财务")  # 不传 mode → 默认 agent
 
     assert [name for name, _ in tools.calls] == ["stock_price_range", "stock_financials"]  # 两轮都跑了
-    assert len(mock.calls) == 5
+    assert len(mock.calls) == 4  # market 意图跳过 rewrite_query
     assert result.mode == "agent"
-    assert "快速问答模式" not in mock.calls[2]["system"]  # agent 模式的 system 不带快速模式声明
+    assert "快速问答模式" not in mock.calls[1]["system"]  # agent 模式的 system 不带快速模式声明
 
 
 async def test_agentic_loop_max_zero_evidence_fallback(make_settings) -> None:
@@ -1094,7 +1198,6 @@ async def test_agentic_loop_max_zero_evidence_fallback(make_settings) -> None:
     mock = MockLLM(
         [
             _router_response('{"intent":"market","out_of_scope":false}'),
-            ChatResponse(stop_reason="end_turn", text="比亚迪 区间"),  # rewrite_query
             _tool_use_response("c1", "stock_price_range", {"name": "比亚迪"}),  # 第 1 轮 (continue)
             _tool_use_response("c2", "stock_financials", {"stock": "比亚迪"}),   # 第 2 轮 (max-reached)
         ]
@@ -1110,7 +1213,7 @@ async def test_agentic_loop_max_zero_evidence_fallback(make_settings) -> None:
     assert "未能取到可靠数据" in result.final_text
     assert [name for name, _ in tools.calls] == ["stock_price_range", "stock_financials"]
     assert len(result.tool_results) == 2
-    assert len(mock.calls) == 4  # router / rewrite / 轮1 / 轮2（不到 synthesizer）
+    assert len(mock.calls) == 3  # router / 轮1 / 轮2（market 跳过 rewrite，不到 synthesizer）
     loop_turns = [d for k, d in events if k == "loop_turn"]
     assert [d["status"] for d in loop_turns] == ["no-progress", "max-reached"]
 
@@ -1122,7 +1225,6 @@ async def test_agentic_loop_events_carry_round(make_settings) -> None:
     mock = MockLLM(
         [
             _router_response('{"intent":"market","out_of_scope":false}'),
-            ChatResponse(stop_reason="end_turn", text="比亚迪 价格"),  # rewrite_query
             _tool_use_response("c1", "stock_price_range", {"name": "比亚迪"}),  # 第 1 轮
             _stop_response(),  # 停止
             ChatResponse(stop_reason="end_turn", text="价格如下。"),  # synthesizer
@@ -1195,7 +1297,7 @@ async def test_agentic_loop_stops_on_no_progress(make_settings) -> None:
 
     assert result.stopped_reason == "fallback"
     assert "未能取到可靠数据" in result.final_text
-    assert llm.calls == 4  # router / rewrite_query / 轮1 / 轮2（不再烧满 10 轮）
+    assert llm.calls == 3  # router / 轮1 / 轮2（market 跳过 rewrite_query，不再烧满 10 轮）
     loop_turns = [d for k, d in events if k == "loop_turn"]
     assert [d["status"] for d in loop_turns] == ["no-progress", "no-progress"]
     assert [d["round"] for d in loop_turns] == [1, 2]
@@ -1233,3 +1335,25 @@ async def test_rag_skipped_for_non_corpus_company(make_settings) -> None:
     structured = out["structured"]
     rag_sources = [s for s in structured["sources"] if s["type"] == "rag"]
     assert rag_sources == []  # 不出现别家年报来源
+
+
+async def test_agent_synth_llm_only_used_by_synthesizer(make_settings) -> None:
+    """深度思考模型路由：Agent(synth_llm=...) 时 router/rewrite_query/tool_rag 选工具三步恒用 llm（快模型），
+    只有 synthesizer 走 synth_llm——两个 mock 队列互不干扰、各自计数吻合。"""
+    tools = FakeToolProvider(SPECS, {"stock_price_range": ToolResult(content='[{"close":1604.9}]', is_error=False)})
+    fast = MockLLM(
+        [
+            _router_response('{"intent":"report","out_of_scope":false}'),
+            ChatResponse(stop_reason="end_turn", text="比亚迪 价格"),  # rewrite_query（report 意图不跳过）
+            _tool_use_response("c1", "stock_price_range", {"name": "比亚迪"}),
+            _stop_response(),
+        ]
+    )
+    reasoner = MockLLM([ChatResponse(stop_reason="end_turn", text="比亚迪区间约 1604.9 元（深度思考）。")])
+    agent = Agent(llm=fast, tools=tools, config=make_settings(), synth_llm=reasoner)
+    result = await agent.run("比亚迪价格")
+
+    assert result.stopped_reason == "end_turn"
+    assert "深度思考" in result.final_text
+    assert len(fast.calls) == 4  # router / rewrite_query / tool选择 / 停止判定
+    assert len(reasoner.calls) == 1  # 只有 synthesizer 走 reasoner
