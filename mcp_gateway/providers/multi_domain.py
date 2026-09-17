@@ -28,7 +28,11 @@ from dataclasses import replace
 from typing import Any, Self
 
 from demomcp.interfaces.types import ToolResult, ToolSpec
-from demomcp.providers.tools.mcp import MCPToolProvider, mcp_tool_provider
+from demomcp.providers.tools.mcp import (
+    MCPToolProvider,
+    describe_exception,
+    mcp_tool_provider,
+)
 
 logger = logging.getLogger("mcp_gateway.providers")
 
@@ -175,7 +179,7 @@ class MultiDomainMCPProvider:
         except Exception as exc:  # noqa: BLE001 - 单域不可用不阻断，冷却后重试
             logger.warning(
                 "[%s] 域 %s 不可用，%.0fs 后重试：%s", self._prefix.rstrip("_"), domain,
-                DOMAIN_RETRY_COOLDOWN, exc,
+                DOMAIN_RETRY_COOLDOWN, describe_exception(exc),
             )
             self._domain_retry_after[domain] = time.monotonic() + DOMAIN_RETRY_COOLDOWN
             return None

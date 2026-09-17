@@ -42,7 +42,11 @@ from demomcp.graph.skill_loader import CAPABILITY_NOTE
 from demomcp.graph.skills import LIBRARY, get_skill
 from demomcp.interfaces.tool_provider import ToolProvider
 from demomcp.providers.llm.deepseek import DeepSeekLLMClient
-from demomcp.providers.tools.mcp import gateway_business_error, mcp_tool_provider
+from demomcp.providers.tools.mcp import (
+    describe_exception,
+    gateway_business_error,
+    mcp_tool_provider,
+)
 from demomcp.providers.tools.null import NullToolProvider
 from demomcp.rag.schemas import RetrievalPlan
 
@@ -239,7 +243,7 @@ async def _hot_start_tools(app: FastAPI) -> None:
             delay = TOOL_HOT_START_BACKOFF_BASE if delay == 0.0 else min(delay * 2, TOOL_HOT_START_BACKOFF_MAX)
             logger.warning(
                 "连接 MCP 网关 %s 失败，%.0fs 后重试（网关未启动？）：%s",
-                app.state.settings.mcp_gateway_url, delay, exc,
+                app.state.settings.mcp_gateway_url, delay, describe_exception(exc),
             )
             await asyncio.sleep(delay)
         finally:
@@ -287,7 +291,7 @@ async def _recycle_tools_loop(app: FastAPI) -> None:
         except Exception as exc:  # noqa: BLE001 - 重建失败沿用旧池，下一轮再试
             with contextlib.suppress(Exception):
                 await new_stack.aclose()
-            logger.warning("工具池周期重建失败，沿用旧池：%s", exc)
+            logger.warning("工具池周期重建失败，沿用旧池：%s", describe_exception(exc))
             continue
         async with app.state.tools_lock:
             old = app.state.tools_pool
@@ -562,7 +566,7 @@ async def _reconnect_tools_once(app: FastAPI) -> None:
         if warm is not None:
             await warm()
     except Exception as exc:  # noqa: BLE001 - 尽力而为，失败留给下次请求懒建
-        logger.warning("MCP 开关重新打开后的重连尝试失败：%s", exc)
+        logger.warning("MCP 开关重新打开后的重连尝试失败：%s", describe_exception(exc))
     finally:
         if tools is not None:
             await _release_tools(app, tools)

@@ -56,6 +56,33 @@ def _is_transport_failure(exc: Exception) -> bool:
     return False
 
 
+def describe_exception(exc: BaseException, *, max_leaves: int = 3) -> str:
+    """把异常（含 anyio TaskGroup 产生的 ExceptionGroup）展开成人能看懂的一行。
+
+    `BaseExceptionGroup.__str__` 固定返回「unhandled errors in a TaskGroup (N sub-exceptions)」，
+    真正的失败原因（连接被拒/协议不对/超时…）全部丢在 `.exceptions` 里、日志里一个字都看不到——
+    `streamablehttp_client` 内部用 anyio TaskGroup，建连失败时抛的就是这种组合异常。这里递归拆到
+    叶子异常，取前 max_leaves 个拼成一行，其余记数省略，供各处 `logger.warning(..., exc)` 调用替换
+    裸 `%s` 格式化。
+    """
+    leaves: list[BaseException] = []
+
+    def _collect(e: BaseException) -> None:
+        if isinstance(e, BaseExceptionGroup):
+            for sub in e.exceptions:
+                _collect(sub)
+        else:
+            leaves.append(e)
+
+    _collect(exc)
+    if not leaves:
+        return f"{type(exc).__name__}: {exc}"
+    shown = [f"{type(e).__name__}: {e}" for e in leaves[:max_leaves]]
+    if len(leaves) > max_leaves:
+        shown.append(f"…+{len(leaves) - max_leaves} more")
+    return "; ".join(shown)
+
+
 @asynccontextmanager
 async def _streamable_session_factory(
     url: str, *, headers: dict[str, str] | None = None, timeout: float = 30.0

@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 from demomcp.interfaces.tool_provider import ToolProvider
 from demomcp.interfaces.types import ToolResult, ToolSpec
+from demomcp.providers.tools.mcp import describe_exception
 from mcp_gateway.sources import SourceDef
 from mcp_gateway.toggle_store import load_toggle_state, save_source_enabled
 
@@ -69,7 +70,7 @@ class SourcePool:
                 provider = await self.acquire()
                 self.last_tool_count = len(await provider.list_tools())
             except Exception as exc:  # noqa: BLE001 - 状态查询尽力而为，拿不到就显示未知
-                logger.debug("[%s] 取工具数失败：%s", self.source.id, exc)
+                logger.debug("[%s] 取工具数失败：%s", self.source.id, describe_exception(exc))
             finally:
                 if provider is not None:
                     await self.release(provider)
@@ -135,7 +136,7 @@ class SourcePool:
             if warm is not None:
                 await warm()
         except Exception as exc:  # noqa: BLE001 - 尽力而为，失败留给下次调用懒建
-            logger.warning("[%s] 重连尝试失败：%s", self.source.id, exc)
+            logger.warning("[%s] 重连尝试失败：%s", self.source.id, describe_exception(exc))
         finally:
             if provider is not None:
                 await self.release(provider)
@@ -158,7 +159,9 @@ class SourcePool:
                 raise
             except Exception as exc:  # noqa: BLE001 - 热启动非致命：失败记日志并退避重试
                 delay = HOT_START_BACKOFF_BASE if delay == 0.0 else min(delay * 2, HOT_START_BACKOFF_MAX)
-                logger.warning("[%s] 热启动失败，%.0fs 后重试：%s", self.source.id, delay, exc)
+                logger.warning(
+                    "[%s] 热启动失败，%.0fs 后重试：%s", self.source.id, delay, describe_exception(exc)
+                )
                 await asyncio.sleep(delay)
             finally:
                 if provider is not None:
@@ -174,7 +177,7 @@ class SourcePool:
         except Exception as exc:  # noqa: BLE001 - 重建失败沿用旧池，下一轮再试
             with contextlib.suppress(Exception):
                 await stack.aclose()
-            logger.warning("[%s] 周期重建失败，沿用旧池：%s", self.source.id, exc)
+            logger.warning("[%s] 周期重建失败，沿用旧池：%s", self.source.id, describe_exception(exc))
             return
         async with self._lock:
             old = self._pool
@@ -263,12 +266,12 @@ class GatewayToolProvider:
         try:
             provider = await pool.acquire()
         except Exception as exc:  # noqa: BLE001 - 单源不可用不拖垮整体清单
-            logger.warning("[%s] 获取连接失败，本轮跳过：%s", source_id, exc)
+            logger.warning("[%s] 获取连接失败，本轮跳过：%s", source_id, describe_exception(exc))
             return []
         try:
             pool_specs = await provider.list_tools()
         except Exception as exc:  # noqa: BLE001 - 单源 list_tools 失败不拖垮整体清单
-            logger.warning("[%s] list_tools 失败，本轮跳过：%s", source_id, exc)
+            logger.warning("[%s] list_tools 失败，本轮跳过：%s", source_id, describe_exception(exc))
             pool_specs = []
         finally:
             await pool.release(provider)
