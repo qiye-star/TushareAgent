@@ -9,6 +9,7 @@
 services:
   demo:
     build: .
+    container_name: tushare-demo
     ports:
       - "8010:8010"
     env_file:
@@ -17,11 +18,14 @@ services:
       # 会话历史用 SQLite，且放进 volume 便于持久化
       DEMO_DATABASE_URL: sqlite+aiosqlite:////app/data/demo.db
       # 取数唯一入口：compose 网络里按 service 名访问网关
-      MCP_GATEWAY_URL: http://mcp-gateway:8766/mcp
+      MCP_GATEWAY_URL: http://tushare-mcp-gateway:8766/mcp
     volumes:
       - demo_data:/app/data                      # 会话 demo.db（保留；同目录下 settings/mcp_toggle.json 随之持久化）
       - ./data/vectorstore:/app/data/vectorstore  # 共享本地已建好的 RAG 索引（has_index→load_index 快载，不重灌）
       - ./docs:/app/docs                          # 语料（RAG_CORPUS_DIR=docs 可解析；索引未命中时也可 ingest）
+    networks:
+      - default
+      - 1panel-network
     restart: unless-stopped
 
   # 内置本地 Tushare 数据代理 MCP（mcp_server/server.py）：独立服务，默认不随 `docker compose up` 启动
@@ -31,9 +35,8 @@ services:
   # （两个 service 共享 compose 默认网络，可用 service 名互相访问）。
   mcp-server:
     build: .
+    container_name: tushare-mcp-server
     command: ["uv", "run", "python", "mcp_server/server.py"]
-    ports:
-      - "8765:8765"
     env_file:
       - .env
     environment:
@@ -41,6 +44,9 @@ services:
       MCP_SERVER_PORT: "8765"
       # TUSHARE_PROXY_URL: http://host.docker.internal:8000
       # TUSHARE_API_KEY:
+    networks:
+      - default
+      - 1panel-network
     restart: unless-stopped
     profiles:
       - mcp-server   # 默认不随 `docker compose up` 启动（与 demo 主服务解耦）；
@@ -53,15 +59,25 @@ services:
   # 配置只在 mcp_gateway/.env（从项目根 .env 搬 TUSHARE_MCP_URL 与 WIND_API_KEY 两行过来）。
   mcp-gateway:
     build: .
+    container_name: tushare-mcp-gateway
     command: ["uv", "run", "uvicorn", "mcp_gateway.app:app", "--host", "0.0.0.0", "--port", "8766"]
-    ports:
-      - "8766:8766"
     env_file:
       - mcp_gateway/.env   # 必需文件：见 mcp_gateway/.env.example（缺了 compose 会直接报 env file not found）
     volumes:
       - mcp_gateway_data:/app/mcp_gateway/data   # 按源开关持久化（sources.json），容器重建后保留
+    networks:
+      - default
+      - 1panel-network
     restart: unless-stopped
 
 volumes:
   demo_data:
   mcp_gateway_data:
+
+# 1panel-network 是 1Panel 预先创建的外部网络（compose 不负责创建/删除它），
+# 数据库等由 1Panel 管理的容器在这个网络里，demo 靠容器名即可访问。
+# 保留 default 网络，让 demo ↔ mcp-gateway 仍可用 service 名互访。
+networks:
+  default:
+  1panel-network:
+    external: true
