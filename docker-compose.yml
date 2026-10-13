@@ -17,8 +17,10 @@ services:
     environment:
       # 会话历史用 SQLite，且放进 volume 便于持久化
       DEMO_DATABASE_URL: sqlite+aiosqlite:////app/data/demo.db
-      # 取数唯一入口：compose 网络里按 service 名访问网关
-      MCP_GATEWAY_URL: http://tushare-mcp-gateway:8766/mcp
+      # 取数唯一入口：网关直接跑在宿主机上（不用容器），经 host.docker.internal 访问宿主机 8766
+      MCP_GATEWAY_URL: http://host.docker.internal:8766/mcp
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # Linux 必需；Docker Desktop 自带该域名，写了也无害
     volumes:
       - demo_data:/app/data                      # 会话 demo.db（保留；同目录下 settings/mcp_toggle.json 随之持久化）
       - ./data/vectorstore:/app/data/vectorstore  # 共享本地已建好的 RAG 索引（has_index→load_index 快载，不重灌）
@@ -69,6 +71,9 @@ services:
       - default
       - 1panel-network
     restart: unless-stopped
+    profiles:
+      - gateway-container   # 网关改在宿主机直接运行，容器版默认不随 `docker compose up` 启动；
+                            # 要改回容器网关：`docker compose --profile gateway-container up -d`，并把 demo 的 MCP_GATEWAY_URL 改回 http://tushare-mcp-gateway:8766/mcp
 
 volumes:
   demo_data:
